@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#111418">
+<title>Todo</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --fg:#14171a; --dim:#6b7280;
+  --accent:#2563eb; --danger:#dc2626; --warn:#b45309; --ok:#059669;
+  --radius:12px; --tap:44px;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#111418; --card:#191d23; --line:#2a3038; --fg:#e8eaed; --dim:#9aa4b2;
+        --accent:#5b9dff; --danger:#f87171; --warn:#fbbf24; --ok:#34d399;}
+}
+*{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+html,body{margin:0}
+body{
+  background:var(--bg); color:var(--fg); font:16px/1.45 -apple-system,BlinkMacSystemFont,
+  "Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  padding:env(safe-area-inset-top) 0 calc(24px + env(safe-area-inset-bottom));
+}
+.wrap{max-width:660px; margin:0 auto; padding:16px}
+h1{font-size:20px; margin:4px 0 16px; display:flex; align-items:center; gap:8px}
+h1 .count{font-size:13px; font-weight:500; color:var(--dim)}
+button,input,textarea{font:inherit; color:inherit}
+button{cursor:pointer; background:none; border:none}
+.btn{
+  min-height:var(--tap); padding:0 16px; border-radius:var(--radius);
+  background:var(--accent); color:#fff; font-weight:600; border:none;
+}
+.btn.ghost{background:transparent; color:var(--dim); border:1px solid var(--line); font-weight:500}
+.btn:active{opacity:.75}
+input[type=text],input[type=password],input[type=datetime-local],textarea{
+  width:100%; min-height:var(--tap); padding:10px 12px; background:var(--card);
+  border:1px solid var(--line); border-radius:var(--radius); outline:none;
+}
+input:focus,textarea:focus{border-color:var(--accent)}
+
+/* login */
+#login{max-width:340px; margin:14vh auto; padding:0 16px; text-align:center}
+#login h2{font-size:22px; margin:0 0 4px}
+#login p{color:var(--dim); font-size:14px; margin:0 0 20px}
+#login form{display:flex; flex-direction:column; gap:10px}
+
+/* composer */
+#add{display:flex; flex-direction:column; gap:8px; background:var(--card);
+     border:1px solid var(--line); border-radius:var(--radius); padding:10px; margin-bottom:18px}
+#add .row{display:flex; gap:8px}
+#add .row input{flex:1}
+.quick{display:flex; gap:6px; flex-wrap:wrap}
+.chipbtn{padding:6px 10px; font-size:13px; border:1px solid var(--line);
+         border-radius:999px; color:var(--dim); background:var(--card)}
+.chipbtn.on{border-color:var(--accent); color:var(--accent)}
+
+/* list */
+ul{list-style:none; margin:0 0 8px; padding:0}
+li{display:flex; align-items:flex-start; gap:10px; padding:11px 12px; background:var(--card);
+   border:1px solid var(--line); border-radius:var(--radius); margin-bottom:8px}
+li.done{opacity:.5}
+li.done .txt{text-decoration:line-through}
+.box{flex:0 0 24px; height:24px; margin-top:1px; border:2px solid var(--line);
+     border-radius:7px; display:grid; place-items:center; color:transparent; font-size:14px}
+li.done .box{border-color:var(--ok); color:var(--ok); background:transparent}
+.mid{flex:1; min-width:0}
+.txt{display:block; word-break:break-word; padding:1px 0; cursor:text}
+.meta{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:4px}
+.due{font-size:12.5px; color:var(--dim); border:1px solid var(--line);
+     border-radius:999px; padding:3px 9px; white-space:nowrap}
+.due.overdue{color:var(--danger); border-color:currentColor}
+.due.soon{color:var(--warn); border-color:currentColor}
+.due.none{color:var(--dim); opacity:.65}
+.del{flex:0 0 32px; height:32px; color:var(--dim); font-size:20px; line-height:1; border-radius:8px}
+.sec{font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim);
+     margin:20px 4px 8px; display:flex; justify-content:space-between; align-items:center}
+.empty{text-align:center; color:var(--dim); padding:36px 12px; font-size:15px}
+#err{position:fixed; left:50%; transform:translateX(-50%); bottom:20px; max-width:90vw;
+     background:var(--danger); color:#fff; padding:10px 16px; border-radius:var(--radius);
+     font-size:14px; display:none; z-index:9}
+.hide{display:none !important}
+.editing input{margin:0}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h2>Todo</h2>
+  <p>Enter your passphrase</p>
+  <form id="loginForm">
+    <input type="password" id="pw" autocomplete="current-password" placeholder="Passphrase" autofocus>
+    <button class="btn" type="submit">Unlock</button>
+  </form>
+</div>
+
+<div class="wrap hide" id="app">
+  <h1>Todo <span class="count" id="count"></span></h1>
+
+  <form id="add">
+    <div class="row">
+      <input type="text" id="newText" placeholder="What needs doing?" autocomplete="off" enterkeyhint="done">
+      <button class="btn" type="submit">Add</button>
+    </div>
+    <div class="quick" id="quick">
+      <button type="button" class="chipbtn" data-when="18:00:0">Today 6pm</button>
+      <button type="button" class="chipbtn" data-when="09:00:1">Tomorrow 9am</button>
+      <button type="button" class="chipbtn" data-when="09:00:7">Next week</button>
+      <button type="button" class="chipbtn" id="pickBtn">Pick date…</button>
+    </div>
+    <input type="datetime-local" id="newDue" class="hide">
+  </form>
+
+  <div id="list"></div>
+  <div class="sec" id="doneHead" style="display:none">
+    <span>Completed</span><button class="chipbtn" id="clearDone">Clear</button>
+  </div>
+  <div id="doneList"></div>
+</div>
+
+<div id="err"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let todos = [];
+let token = localStorage.getItem("todo_token") || "";
+
+function toast(msg) {
+  const e = $("#err"); e.textContent = msg; e.style.display = "block";
+  clearTimeout(toast._t); toast._t = setTimeout(() => (e.style.display = "none"), 3500);
+}
+
+async function call(payload) {
+  const r = await fetch("/api", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && payload.op !== "login") { logout(); throw new Error("session expired"); }
+  if (!r.ok || data.error) throw new Error(data.error || "request failed");
+  return data;
+}
+
+function logout() {
+  token = ""; localStorage.removeItem("todo_token");
+  $("#app").classList.add("hide"); $("#login").classList.remove("hide");
+}
+
+/* ---------- dates ---------- */
+
+const pad = (n) => String(n).padStart(2, "0");
+const toInput = (d) =>
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+function relDue(iso) {
+  const d = new Date(iso), now = new Date();
+  const day = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.round((day - today) / 864e5);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  let label;
+  if (days === 0) label = "Today " + time;
+  else if (days === 1) label = "Tomorrow " + time;
+  else if (days === -1) label = "Yesterday " + time;
+  else if (days > 1 && days < 7) label = d.toLocaleDateString([], { weekday: "long" }) + " " + time;
+  else label = d.toLocaleDateString([], { month: "short", day: "numeric" }) +
+    (d.getFullYear() !== now.getFullYear() ? ", " + d.getFullYear() : "") + " " + time;
+  const cls = d < now ? "overdue" : days <= 1 ? "soon" : "";
+  return { label, cls };
+}
+
+/* ---------- render ---------- */
+
+function render() {
+  const open = todos.filter((t) => !t.done);
+  const done = todos.filter((t) => t.done);
+  const key = (t) => (t.remindAt ? new Date(t.remindAt).getTime() : 8.64e15);
+  open.sort((a, b) => key(a) - key(b) || (a.createdAt || "").localeCompare(b.createdAt || ""));
+  done.sort((a, b) => (b.doneAt || "").localeCompare(a.doneAt || ""));
+
+  const overdue = open.filter((t) => t.remindAt && new Date(t.remindAt) < new Date()).length;
+  $("#count").textContent = open.length
+    ? `${open.length} open${overdue ? ` · ${overdue} overdue` : ""}`
+    : "";
+
+  $("#list").innerHTML = open.length
+    ? `<ul>${open.map(row).join("")}</ul>`
+    : `<div class="empty">Nothing open. 🎉</div>`;
+  $("#doneHead").style.display = done.length ? "flex" : "none";
+  $("#doneList").innerHTML = done.length ? `<ul>${done.map(row).join("")}</ul>` : "";
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function row(t) {
+  const d = t.remindAt ? relDue(t.remindAt) : null;
+  return `<li class="${t.done ? "done" : ""}" data-id="${t.id}">
+    <button class="box" data-act="toggle" aria-label="toggle">✓</button>
+    <div class="mid">
+      <span class="txt" data-act="edit">${esc(t.text)}</span>
+      <div class="meta">
+        <button class="due ${d ? d.cls : "none"}" data-act="due">${d ? esc(d.label) : "+ remind me"}</button>
+      </div>
+    </div>
+    <button class="del" data-act="del" aria-label="delete">×</button>
+  </li>`;
+}
+
+/* ---------- actions ---------- */
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const li = btn.closest("li"); const id = li.dataset.id;
+  const t = todos.find((x) => x.id === id);
+  if (!t) return;
+
+  if (btn.dataset.act === "toggle") {
+    t.done = !t.done; t.doneAt = t.done ? new Date().toISOString() : null; render();
+    try { await call({ op: "update", id, done: t.done }); } catch (err) { toast(err.message); await refresh(); }
+  }
+
+  if (btn.dataset.act === "del") {
+    todos = todos.filter((x) => x.id !== id); render();
+    try { await call({ op: "delete", id }); } catch (err) { toast(err.message); await refresh(); }
+  }
+
+  if (btn.dataset.act === "due") {
+    const inp = document.createElement("input");
+    inp.type = "datetime-local";
+    if (t.remindAt) inp.value = toInput(new Date(t.remindAt));
+    btn.replaceWith(inp);
+    inp.focus(); inp.showPicker?.();
+    const save = async () => {
+      const iso = inp.value ? new Date(inp.value).toISOString() : null;
+      if (iso !== (t.remindAt || null)) {
+        try { const r = await call({ op: "update", id, remindAt: iso }); Object.assign(t, r.todo); }
+        catch (err) { toast(err.message); }
+      }
+      render();
+    };
+    inp.addEventListener("change", save);
+    inp.addEventListener("blur", () => setTimeout(save, 120));
+  }
+
+  if (btn.dataset.act === "edit") {
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.value = t.text; inp.className = "txt";
+    btn.replaceWith(inp); inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length);
+    let saved = false;
+    const save = async () => {
+      if (saved) return; saved = true;
+      const text = inp.value.trim();
+      if (text && text !== t.text) {
+        t.text = text;
+        try { await call({ op: "update", id, text }); } catch (err) { toast(err.message); await refresh(); }
+      }
+      render();
+    };
+    inp.addEventListener("blur", save);
+    inp.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") save();
+      if (ev.key === "Escape") { saved = true; render(); }
+    });
+  }
+});
+
+/* composer */
+let pendingDue = null;
+
+$("#quick").addEventListener("click", (e) => {
+  const b = e.target.closest(".chipbtn"); if (!b) return;
+  if (b.id === "pickBtn") {
+    const inp = $("#newDue");
+    inp.classList.remove("hide");
+    inp.value = pendingDue ? toInput(pendingDue) : toInput(new Date(Date.now() + 36e5));
+    inp.focus(); inp.showPicker?.();
+    return;
+  }
+  const [hm, plus] = b.dataset.when.split(":").length === 3
+    ? [b.dataset.when.slice(0, 5), +b.dataset.when.split(":")[2]]
+    : [b.dataset.when, 0];
+  const [h, m] = hm.split(":").map(Number);
+  const d = new Date(); d.setDate(d.getDate() + plus); d.setHours(h, m, 0, 0);
+  const same = pendingDue && pendingDue.getTime() === d.getTime();
+  pendingDue = same ? null : d;
+  $("#newDue").classList.add("hide");
+  syncQuick(b, !same);
+});
+
+$("#newDue").addEventListener("change", (e) => {
+  pendingDue = e.target.value ? new Date(e.target.value) : null;
+  syncQuick($("#pickBtn"), !!pendingDue);
+});
+
+function syncQuick(active, on) {
+  document.querySelectorAll("#quick .chipbtn").forEach((c) => c.classList.remove("on"));
+  if (on && active) active.classList.add("on");
+}
+
+$("#add").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("#newText").value.trim();
+  if (!text) return;
+  const remindAt = pendingDue ? pendingDue.toISOString() : null;
+  $("#newText").value = ""; pendingDue = null;
+  $("#newDue").classList.add("hide"); syncQuick(null, false);
+  const optimistic = { id: "tmp" + Math.random(), text, done: false, remindAt,
+                       createdAt: new Date().toISOString() };
+  todos.push(optimistic); render();
+  try {
+    const r = await call({ op: "create", text, remindAt });
+    Object.assign(optimistic, r.todo);
+  } catch (err) { toast(err.message); }
+  render();
+});
+
+$("#clearDone").addEventListener("click", async () => {
+  const n = todos.filter((t) => t.done).length;
+  if (!n || !confirm(`Delete ${n} completed item${n > 1 ? "s" : ""}?`)) return;
+  todos = todos.filter((t) => !t.done); render();
+  try { await call({ op: "clearDone" }); } catch (err) { toast(err.message); await refresh(); }
+});
+
+/* login / boot */
+
+$("#loginForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector("button");
+  btn.disabled = true; btn.textContent = "Checking…";
+  try {
+    const r = await call({ op: "login", password: $("#pw").value });
+    token = r.token; localStorage.setItem("todo_token", token);
+    todos = r.todos || []; $("#pw").value = "";
+    show();
+  } catch (err) { toast(err.message); }
+  btn.disabled = false; btn.textContent = "Unlock";
+});
+
+function show() {
+  $("#login").classList.add("hide");
+  $("#app").classList.remove("hide");
+  render();
+}
+
+async function refresh() {
+  try { const r = await call({ op: "list" }); todos = r.todos || []; render(); }
+  catch (err) { /* handled by call() */ }
+}
+
+if (token) { show(); refresh(); }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && token) refresh();
+});
+</script>
+</body>
+</html>

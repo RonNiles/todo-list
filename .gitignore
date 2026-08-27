@@ -1,0 +1,6 @@
+lambda/node_modules/
+build/
+build.zip
+infra/config.*.env
+!infra/config.example.env
+.token.*
