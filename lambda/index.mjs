@@ -58,6 +58,11 @@ async function allTodos() {
 
 const clean = (s, max) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
+// Notes are the one free-text field where line breaks carry meaning, so collapse
+// horizontal whitespace only and cap consecutive blank lines.
+const cleanNote = (s) => String(s ?? "").replace(/\r\n?/g, "\n")
+  .replace(/[^\S\n]+/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, 2000);
+
 function normRemind(v) {
   if (!v) return null;
   const t = new Date(v);
@@ -77,7 +82,7 @@ async function api(op, body) {
       const item = {
         id: crypto.randomUUID(),
         text,
-        notes: clean(body.notes, 2000) || undefined,
+        notes: cleanNote(body.notes) || undefined,
         done: false,
         remindAt: normRemind(body.remindAt) || undefined,
         notified: false,
@@ -96,7 +101,7 @@ async function api(op, body) {
         sets.text = t;
       }
       if ("notes" in body) {
-        const n = clean(body.notes, 2000);
+        const n = cleanNote(body.notes);
         n ? (sets.notes = n) : removes.push("notes");
       }
       if ("done" in body) {
@@ -173,13 +178,14 @@ async function sweep() {
   const subject = due.length === 1
     ? `Todo due: ${due[0].text.slice(0, 80)}`
     : `${due.length} todos due`;
-  const lines = due.map((t) => `• ${t.text}  (${fmt(t.remindAt)})${t.notes ? `\n    ${t.notes}` : ""}`);
+  const indent = (n) => n.split("\n").map((l) => `    ${l}`).join("\n");
+  const lines = due.map((t) => `• ${t.text}  (${fmt(t.remindAt)})${t.notes ? `\n${indent(t.notes)}` : ""}`);
   const html = `<div style="font:16px/1.5 -apple-system,Segoe UI,sans-serif">
 <p style="margin:0 0 12px">These todos are due:</p>
 <ul style="padding-left:20px;margin:0">${due.map((t) =>
     `<li style="margin-bottom:8px"><b>${esc(t.text)}</b><br>
 <span style="color:#666;font-size:14px">${esc(fmt(t.remindAt))}</span>${
-      t.notes ? `<br><span style="font-size:14px">${esc(t.notes)}</span>` : ""}</li>`).join("")}</ul></div>`;
+      t.notes ? `<br><span style="font-size:14px">${esc(t.notes).replace(/\n/g, "<br>")}</span>` : ""}</li>`).join("")}</ul></div>`;
 
   await ses.send(new SendEmailCommand({
     FromEmailAddress: EMAIL_FROM,

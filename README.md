@@ -130,6 +130,24 @@ Useful commands — add `--profile home` to each for the personal list:
     aws logs tail /aws/lambda/todo-list --follow          # live logs
     ./infra/destroy.sh home                               # delete everything
 
+## Using the page
+
+Everything is inline — there is no detail view or modal.
+
+| Gesture | Effect |
+|---|---|
+| type + **Add** | new item; the chips above set an optional reminder before you add |
+| tap the checkbox | toggle done |
+| tap the text | edit it in place — Enter saves, Esc cancels |
+| tap the date chip | set or change the reminder; clear the field to remove it |
+| tap **+ note**, or an existing note | edit notes — tap away or ⌘/Ctrl+Enter saves, Esc cancels |
+| tap **×** | delete |
+| **Clear** under Completed | delete every completed item |
+
+Notes keep their line breaks and show under the item text, greyed; reminder emails
+include them. Overdue items show the date in red, items due today or tomorrow in
+amber.
+
 ## Poking at it from the shell
 
 `infra/api.sh` handles the login dance and caches the token, so inspecting state is

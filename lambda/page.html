@@ -73,6 +73,11 @@ li.done .box{border-color:var(--ok); color:var(--ok); background:transparent}
 .due.overdue{color:var(--danger); border-color:currentColor}
 .due.soon{color:var(--warn); border-color:currentColor}
 .due.none{color:var(--dim); opacity:.65}
+.note{font-size:14px; color:var(--dim); white-space:pre-wrap; word-break:break-word;
+      margin-top:4px; cursor:text}
+li.done .note{text-decoration:line-through}
+textarea.noteedit{margin-top:4px; font-size:14px; min-height:56px; resize:vertical;
+                  line-height:1.4; display:block}
 .del{flex:0 0 32px; height:32px; color:var(--dim); font-size:20px; line-height:1; border-radius:8px}
 .sec{font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim);
      margin:20px 4px 8px; display:flex; justify-content:space-between; align-items:center}
@@ -194,14 +199,22 @@ function render() {
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+function replaceTodo(id, fresh) {
+  if (!fresh) return;
+  const i = todos.findIndex((x) => x.id === id);
+  if (i >= 0) todos[i] = fresh;
+}
+
 function row(t) {
   const d = t.remindAt ? relDue(t.remindAt) : null;
   return `<li class="${t.done ? "done" : ""}" data-id="${t.id}">
     <button class="box" data-act="toggle" aria-label="toggle">✓</button>
     <div class="mid">
       <span class="txt" data-act="edit">${esc(t.text)}</span>
+      ${t.notes ? `<div class="note" data-act="note">${esc(t.notes)}</div>` : ""}
       <div class="meta">
         <button class="due ${d ? d.cls : "none"}" data-act="due">${d ? esc(d.label) : "+ remind me"}</button>
+        ${t.notes ? "" : `<button class="due none" data-act="note">+ note</button>`}
       </div>
     </div>
     <button class="del" data-act="del" aria-label="delete">×</button>
@@ -236,13 +249,38 @@ document.addEventListener("click", async (e) => {
     const save = async () => {
       const iso = inp.value ? new Date(inp.value).toISOString() : null;
       if (iso !== (t.remindAt || null)) {
-        try { const r = await call({ op: "update", id, remindAt: iso }); Object.assign(t, r.todo); }
+        try { const r = await call({ op: "update", id, remindAt: iso }); replaceTodo(id, r.todo); }
         catch (err) { toast(err.message); }
       }
       render();
     };
     inp.addEventListener("change", save);
     inp.addEventListener("blur", () => setTimeout(save, 120));
+  }
+
+  if (btn.dataset.act === "note") {
+    const ta = document.createElement("textarea");
+    ta.className = "noteedit";
+    ta.value = t.notes || "";
+    ta.placeholder = "Notes — Esc to cancel, tap away or \u2318/Ctrl+Enter to save";
+    ta.rows = Math.min(10, Math.max(3, ta.value.split("\n").length + 1));
+    btn.replaceWith(ta);
+    ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+    let saved = false;
+    const save = async () => {
+      if (saved) return; saved = true;
+      const notes = ta.value.trim();
+      if (notes !== (t.notes || "")) {
+        try { const r = await call({ op: "update", id, notes }); replaceTodo(id, r.todo); }
+        catch (err) { toast(err.message); }
+      }
+      render();
+    };
+    ta.addEventListener("blur", save);
+    ta.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") { saved = true; render(); }
+      if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save(); }
+    });
   }
 
   if (btn.dataset.act === "edit") {
