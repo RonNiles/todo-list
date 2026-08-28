@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#111418">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="icon" href="/icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Todo">
 <title>Todo</title>
 <style>
 :root{
@@ -25,6 +30,7 @@ body{
 }
 .wrap{max-width:660px; margin:0 auto; padding:16px}
 h1{font-size:20px; margin:4px 0 16px; display:flex; align-items:center; gap:8px}
+h1 .spacer{flex:1}
 h1 .count{font-size:13px; font-weight:500; color:var(--dim)}
 button,input,textarea{font:inherit; color:inherit}
 button{cursor:pointer; background:none; border:none}
@@ -101,7 +107,11 @@ textarea.noteedit{margin-top:4px; font-size:14px; min-height:56px; resize:vertic
 </div>
 
 <div class="wrap hide" id="app">
-  <h1>Todo <span class="count" id="count"></span></h1>
+  <h1>Todo <span class="count" id="count"></span>
+    <span class="spacer"></span>
+    <button class="chipbtn hide" id="bell" title="Notifications"></button>
+    <button class="chipbtn hide" id="belltest" title="Send a test notification">test</button>
+  </h1>
 
   <form id="add">
     <div class="row">
@@ -150,6 +160,7 @@ async function call(payload) {
 
 function logout() {
   token = ""; localStorage.removeItem("todo_token");
+  $("#bell").classList.add("hide"); $("#belltest").classList.add("hide");
   $("#app").classList.add("hide"); $("#login").classList.remove("hide");
 }
 
@@ -362,6 +373,90 @@ $("#clearDone").addEventListener("click", async () => {
   try { await call({ op: "clearDone" }); } catch (err) { toast(err.message); await refresh(); }
 });
 
+/* push notifications */
+
+let pushInfo = { enabled: false, key: "" };
+let pushSub = null;
+let swReg = null;
+
+const pushSupported = () =>
+  "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent);
+const isStandalone = () =>
+  window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+
+function b64ToBytes(b64) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+function setBell() {
+  const b = $("#bell"), t = $("#belltest");
+  if (!pushInfo.enabled || !pushSupported()) {
+    b.classList.add("hide"); t.classList.add("hide"); return;
+  }
+  b.classList.remove("hide");
+  b.textContent = pushSub ? "🔔 on" : "🔔 off";
+  b.classList.toggle("on", !!pushSub);
+  t.classList.toggle("hide", !pushSub);
+}
+
+async function initPush() {
+  if (!pushInfo.enabled) { try { const st = await call({ op: "pushStatus" });
+    pushInfo = { enabled: st.enabled, key: st.key }; } catch { /* leave disabled */ } }
+  if (!pushInfo.enabled || !pushSupported()) { setBell(); return; }
+  try {
+    swReg = await navigator.serviceWorker.register("/sw.js");
+    await navigator.serviceWorker.ready;
+    pushSub = await swReg.pushManager.getSubscription();
+  } catch (err) { console.warn("push init failed", err); }
+  setBell();
+}
+
+$("#bell").addEventListener("click", async () => {
+  if (pushSub) {
+    const endpoint = pushSub.endpoint;
+    try { await pushSub.unsubscribe(); } catch { /* already gone */ }
+    pushSub = null; setBell();
+    try { await call({ op: "unsubscribe", endpoint }); toast("Notifications off"); }
+    catch (err) { toast(err.message); }
+    return;
+  }
+  // iOS only allows web push once the page is installed to the Home Screen.
+  if (isIOS && !isStandalone()) {
+    toast("On iPhone: Share → Add to Home Screen, then open it from there");
+    return;
+  }
+  // Safari needs requestPermission() in the same task as the tap, so it goes first.
+  let perm;
+  try { perm = await Notification.requestPermission(); } catch { perm = "denied"; }
+  if (perm !== "granted") {
+    toast(perm === "denied" ? "Notifications are blocked in your browser settings" : "Not enabled");
+    return;
+  }
+  try {
+    if (!swReg) {
+      swReg = await navigator.serviceWorker.register("/sw.js");
+      await navigator.serviceWorker.ready;
+    }
+    pushSub = await swReg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: b64ToBytes(pushInfo.key),
+    });
+    await call({ op: "subscribe", sub: pushSub.toJSON(), device: navigator.userAgent.slice(0, 120) });
+    setBell();
+    toast("Notifications on");
+  } catch (err) { toast("Could not subscribe: " + err.message); setBell(); }
+});
+
+$("#belltest").addEventListener("click", async () => {
+  try {
+    const r = await call({ op: "testPush" });
+    toast(r.sent ? `Test sent to ${r.sent} device${r.sent > 1 ? "s" : ""}` : "No devices subscribed");
+  } catch (err) { toast(err.message); }
+});
+
 /* login / boot */
 
 $("#loginForm").addEventListener("submit", async (e) => {
@@ -372,6 +467,7 @@ $("#loginForm").addEventListener("submit", async (e) => {
     const r = await call({ op: "login", password: $("#pw").value });
     token = r.token; localStorage.setItem("todo_token", token);
     todos = r.todos || []; $("#pw").value = "";
+    if (r.push) pushInfo = r.push;
     show();
   } catch (err) { toast(err.message); }
   btn.disabled = false; btn.textContent = "Unlock";
@@ -381,6 +477,7 @@ function show() {
   $("#login").classList.add("hide");
   $("#app").classList.remove("hide");
   render();
+  initPush();
 }
 
 async function refresh() {

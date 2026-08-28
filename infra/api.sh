@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NAME=work
-KNOWN=" url token list json raw add done rm table sweep env logs state help -h --help "
+KNOWN=" url token list json raw add done rm table sweep env logs state push testpush help -h --help "
 if [ $# -gt 0 ] && [ -n "$1" ] && [[ "$KNOWN" != *" $1 "* ]]; then
   NAME="$1"; shift
   [ -f "infra/config.$NAME.env" ] || {
@@ -121,6 +121,11 @@ case "$CMD" in
             if(m.length!==1){console.error(m.length?"ambiguous prefix":"no match");process.exit(1)}
             console.log(m[0].id)})')
           call "{\"op\":\"delete\",\"id\":\"$ID\"}"; echo;;
+  push)   call '{"op":"pushStatus"}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+            const j=JSON.parse(s);
+            console.log("push:  " + (j.enabled ? "enabled" : "disabled (CHANNELS has no push, or no VAPID keys)"));
+            if (j.enabled) console.log("devices subscribed: " + j.subs);})';;
+  testpush) call '{"op":"testPush"}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(s))'; echo;;
   table)  "${AWSR[@]}" dynamodb scan --table-name "$APP";;
   sweep)  OUT=$(mktemp)
           "${AWSR[@]}" lambda invoke --function-name "$APP" \
@@ -150,6 +155,7 @@ inspect
   list               todos as a table
   json               todos as raw JSON
   table              raw DynamoDB scan (bypasses the API entirely)
+  push               whether web push is on, and how many devices subscribed
   env                the Lambda's environment variables
   logs [since]       tail CloudWatch logs, e.g. logs 1h
   url                print the endpoint
@@ -161,6 +167,7 @@ change
   rm <id-prefix>
   raw '{"op":"clearDone"}'          any API call, verbatim
   sweep                            force the reminder run now
+  testpush                         send a test notification to every device
 EOF
     ;;
 esac

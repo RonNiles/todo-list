@@ -109,18 +109,62 @@ ROLE_ARN="arn:aws:iam::$ACCT:role/$ROLE"
 
 # ---------- 3. package ----------
 say "Packaging"
-[ -d lambda/node_modules ] && [ -n "$(ls -A lambda/node_modules 2>/dev/null)" ] || {
+[ -d lambda/node_modules/web-push ] || {
   echo "  installing dependencies…"
   (cd lambda && npm install --omit=dev --no-audit --no-fund >/dev/null)
 }
 rm -rf build build.zip && mkdir -p build
-cp lambda/index.mjs lambda/page.html lambda/package.json build/
+cp lambda/index.mjs lambda/page.html lambda/sw.js lambda/manifest.webmanifest \
+   lambda/icon.png lambda/package.json build/
 cp -r lambda/node_modules build/
 (cd build && zip -qr ../build.zip .)
 echo "  build.zip $(du -h build.zip | cut -f1)"
 
+# ---------- 3b. web push keys ----------
+CHANNELS="${CHANNELS:-email}"
+case ",$CHANNELS," in
+  *,push,*)
+    if [ -z "${VAPID_PUBLIC:-}" ] || [ -z "${VAPID_PRIVATE:-}" ]; then
+      say "Generating VAPID keys"
+      KEYS=$(cd lambda && node -e \
+        'const k=require("web-push").generateVAPIDKeys();console.log(k.publicKey);console.log(k.privateKey)')
+      VAPID_PUBLIC=$(printf '%s' "$KEYS" | sed -n 1p)
+      VAPID_PRIVATE=$(printf '%s' "$KEYS" | sed -n 2p)
+      # Fill the template's empty slots if they are there, else append.
+      if grep -q '^VAPID_PUBLIC=' "$CFG"; then
+        sed -i.bak -e "s|^VAPID_PUBLIC=.*|VAPID_PUBLIC=$VAPID_PUBLIC|" \
+                   -e "s|^VAPID_PRIVATE=.*|VAPID_PRIVATE=$VAPID_PRIVATE|" "$CFG" && rm -f "$CFG.bak"
+      else
+        { echo; echo "VAPID_PUBLIC=$VAPID_PUBLIC"; echo "VAPID_PRIVATE=$VAPID_PRIVATE"; } >> "$CFG"
+      fi
+      echo "  keypair written to $CFG (rotating it unsubscribes every device)"
+    fi
+    ;;
+esac
+
 PWHASH=$(printf '%s' "$PASSWORD" | sha256_hex)
-ENVVARS="Variables={TABLE=$TABLE,PASSWORD_HASH=$PWHASH,TOKEN_SECRET=$TOKEN_SECRET,EMAIL_FROM=$EMAIL,EMAIL_TO=$EMAIL,TIMEZONE=$TIMEZONE}"
+# Built as JSON rather than the CLI's Key=Value shorthand, which cannot carry the
+# comma in a multi-channel CHANNELS value.
+TABLE="$TABLE" PWHASH="$PWHASH" TOKEN_SECRET="$TOKEN_SECRET" EMAIL="$EMAIL" \
+TIMEZONE="$TIMEZONE" CHANNELS="$CHANNELS" VAPID_PUBLIC="${VAPID_PUBLIC:-}" \
+VAPID_PRIVATE="${VAPID_PRIVATE:-}" VAPID_SUBJECT="${VAPID_SUBJECT:-mailto:$EMAIL}" \
+node -e '
+  const v = {
+    TABLE: process.env.TABLE,
+    PASSWORD_HASH: process.env.PWHASH,
+    TOKEN_SECRET: process.env.TOKEN_SECRET,
+    EMAIL_FROM: process.env.EMAIL,
+    EMAIL_TO: process.env.EMAIL,
+    TIMEZONE: process.env.TIMEZONE,
+    CHANNELS: process.env.CHANNELS,
+  };
+  if (process.env.VAPID_PUBLIC) {
+    v.VAPID_PUBLIC = process.env.VAPID_PUBLIC;
+    v.VAPID_PRIVATE = process.env.VAPID_PRIVATE;
+    v.VAPID_SUBJECT = process.env.VAPID_SUBJECT;
+  }
+  console.log(JSON.stringify({ Variables: v }));' > build/env.json
+ENVFILE="file://build/env.json"
 
 # ---------- 4. Lambda ----------
 say "Lambda $FUNC"
@@ -128,7 +172,7 @@ if "${AWSR[@]}" lambda get-function --function-name "$FUNC" >/dev/null 2>&1; the
   "${AWSR[@]}" lambda update-function-code --function-name "$FUNC" --zip-file fileb://build.zip >/dev/null
   "${AWSR[@]}" lambda wait function-updated --function-name "$FUNC"
   "${AWSR[@]}" lambda update-function-configuration --function-name "$FUNC" \
-    --environment "$ENVVARS" --timeout 15 --memory-size 512 >/dev/null
+    --environment "$ENVFILE" --timeout 15 --memory-size 512 >/dev/null
   "${AWSR[@]}" lambda wait function-updated --function-name "$FUNC"
   echo "  updated"
 else
@@ -137,7 +181,7 @@ else
     if "${AWSR[@]}" lambda create-function --function-name "$FUNC" \
         --runtime nodejs22.x --handler index.handler --role "$ROLE_ARN" \
         --zip-file fileb://build.zip --timeout 15 --memory-size 512 \
-        --environment "$ENVVARS" >/dev/null 2>&1; then
+        --environment "$ENVFILE" >/dev/null 2>&1; then
       created=yes; echo "  created"; break
     fi
     echo "  waiting for the new IAM role to propagate ($i/6)…"; sleep 8

@@ -72,7 +72,8 @@ passphrase, and stops.
 Open `infra/config.home.env` and set at least:
 
     PROFILE=home                    # the profile you just configured
-    EMAIL=you@personal-address.com  # sender AND recipient of reminders
+    CHANNELS=push                   # push, email, or both
+    EMAIL=you@personal-address.com  # recipient, and the VAPID contact address
     TIMEZONE=America/Los_Angeles    # times shown inside reminder emails
 
 Leave `FRONTDOOR=auto` — see [Front door](#front-door) below. Leave `APP=todo-list`;
@@ -88,9 +89,22 @@ It prints each resource as it goes and ends with your URL and passphrase. Expect
 roughly a minute; creating a brand-new IAM role usually costs one retry while the
 role propagates, which the script handles.
 
-### 6. Verify your email address
+### 6. Turn on notifications
 
-The first deploy registers your address with SES and AWS emails you an
+**With `CHANNELS=push`** there is nothing to verify — the first deploy generates a
+VAPID keypair and writes it back into your config. Open the URL, log in, and tap the
+🔔 in the header. On a laptop that is the whole story. On a phone, install it first
+(step 8) — iOS only permits web push from a Home Screen app.
+
+The **test** button next to the bell sends a notification immediately, which is the
+fastest way to confirm a device is wired up. From a terminal:
+`./infra/api.sh home push` lists how many devices are subscribed.
+
+Skip to step 8 unless you also want email.
+
+### 6b. Verify your email address
+
+Only if `CHANNELS` includes `email`. The first deploy registers your address with SES and AWS emails you an
 **"Amazon Web Services – Email Address Verification"** message. **Click the link in
 it.** Until you do, the app works fine but reminder emails silently fail.
 
@@ -113,7 +127,8 @@ It prints `{"sent":1,...}` and the email arrives within a few seconds.
 ### 8. Put it on your phone
 
 Open the URL in mobile Safari or Chrome and use **Add to Home Screen**. It gets its
-own icon and opens without browser chrome. The login token lives in `localStorage`
+own icon and opens without browser chrome. On iOS this is also a hard requirement
+for web push — open the installed app, then tap the 🔔. The login token lives in `localStorage`
 for 45 days per device, so you type the passphrase about eight times a year.
 
 ---
@@ -141,6 +156,7 @@ Everything is inline — there is no detail view or modal.
 | tap the text | edit it in place — Enter saves, Esc cancels |
 | tap the date chip | set or change the reminder; clear the field to remove it |
 | tap **+ note**, or an existing note | edit notes — tap away or ⌘/Ctrl+Enter saves, Esc cancels |
+| tap 🔔 in the header | turn notifications on or off for this device |
 | tap **×** | delete |
 | **Clear** under Completed | delete every completed item |
 
@@ -220,6 +236,10 @@ field selects the operation. Every op except `login` needs a bearer token.
 | `{"op":"update","id":"…", …}` | `{todo}` — send any of `text`, `done`, `remindAt`, `notes` |
 | `{"op":"delete","id":"…"}` | `{ok:true}` |
 | `{"op":"clearDone"}` | `{removed:n}` |
+| `{"op":"pushStatus"}` | `{enabled, key, subs}` — `key` is the VAPID public key |
+| `{"op":"subscribe","sub":{…},"device":"…"}` | `{ok:true, subs:n}` — `sub` is `PushSubscription.toJSON()` |
+| `{"op":"unsubscribe","endpoint":"…"}` | `{ok:true}` |
+| `{"op":"testPush"}` | `{sent:n, removed:n}` |
 
 Failures come back as `{"error":"…"}` with 400 (bad JSON), 401 (bad passphrase or
 token), 405 (wrong method) or 500. `remindAt` is any string `new Date()` parses and
@@ -277,6 +297,8 @@ normalises input, so prefer `api.sh raw` for changes.
 
     lambda/index.mjs          handler: serves the page, the API, and the sweep
     lambda/page.html          the entire UI — vanilla JS, no build step
+    lambda/sw.js              service worker: receives pushes, focuses the app
+    lambda/manifest.webmanifest, lambda/icon.png   Home Screen install
     infra/api.sh              shell client: inspect and change a live list
     infra/config.example.env  template, committed
     infra/config.<name>.env   your real config: secrets, account pin (gitignored)
@@ -298,6 +320,31 @@ At one person's volume — a few thousand requests a month, a handful of emails 
 and, after twelve months, API Gateway requests. Worst case is cents per month. AWS
 has revised free-tier terms more than once, so treat the table as the shape of the
 design rather than a promise, and set a billing alarm if you want certainty.
+
+### Notification channels
+
+`CHANNELS` is a comma list of `push`, `email`, or both. The sweep tries every
+enabled channel and only marks an item notified if at least one got through, so a
+reminder is never silently lost — it retries on the next sweep.
+
+**Web push** goes straight from your Lambda to the device: no third party, no
+deliverability, nothing to verify. The first deploy with push enabled generates a
+VAPID keypair into your config. Devices subscribe through the 🔔 in the header, and
+their subscriptions live in the same DynamoDB table under a `sub#` id prefix.
+Browsers answer 404 or 410 once a subscription dies, which is the only signal that a
+device is gone, so the sweep prunes on it.
+
+Requirements: HTTPS (you have it), and on **iOS 16.4+ the page must be added to the
+Home Screen** — Safari refuses `Notification.requestPermission()` from a normal tab.
+Android Chrome and desktop browsers need nothing special. Rotating the VAPID keys
+silently unsubscribes every device.
+
+**Email** is worth knowing about before you pick it. SES signs as `amazonses.com`,
+so a message with `From: you@yahoo.com` fails DMARC alignment — and yahoo.com
+publishes `p=reject`, so Yahoo refuses it. Verifying the address in SES proves you
+own it for *receiving*; it cannot authorise you to send *as* Yahoo. The same applies
+to any provider with a strict DMARC policy. Either use push, or send from a domain
+you control and can DKIM-sign.
 
 ### Front door
 
@@ -363,6 +410,10 @@ other way round. `destroy.sh` enforces the same pin and makes you type the app n
 | 403 on the URL, nothing in CloudWatch | org policy blocking Function URLs — set `FRONTDOOR=apigw` |
 | 500 on every request through API Gateway | Lambda invoke permission source ARN must be `<api-id>/*` |
 | page loads, everything 401s | `TOKEN_SECRET` changed — log in again |
+| no 🔔 in the header | `CHANNELS` has no `push`, or the browser lacks Push API support |
+| 🔔 does nothing on iPhone | not installed to the Home Screen — Safari blocks push in a normal tab |
+| notifications stop after working | subscription expired; tap 🔔 off and on again |
+| sweep returns `retrying:true` | nothing was delivered on any channel; item stays pending |
 
 ## Privacy note
 

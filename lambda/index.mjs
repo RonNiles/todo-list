@@ -5,6 +5,7 @@ import {
   DynamoDBDocumentClient, ScanCommand, PutCommand, UpdateCommand, DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
+import webpush from "web-push";
 
 const TABLE = process.env.TABLE;
 const PASSWORD_HASH = process.env.PASSWORD_HASH;
@@ -14,11 +15,24 @@ const EMAIL_TO = process.env.EMAIL_TO;
 const TIMEZONE = process.env.TIMEZONE || "UTC";
 const TOKEN_DAYS = 45;
 
+// Delivery channels. Defaults to email so an existing deploy keeps its behaviour.
+const CHANNELS = (process.env.CHANNELS || "email").split(",").map((c) => c.trim()).filter(Boolean);
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC || "";
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE || "";
+const PUSH_ON = CHANNELS.includes("push") && !!VAPID_PUBLIC && !!VAPID_PRIVATE;
+const EMAIL_ON = CHANNELS.includes("email") && !!EMAIL_FROM;
+if (PUSH_ON) {
+  webpush.setVapidDetails(process.env.VAPID_SUBJECT || `mailto:${EMAIL_TO}`, VAPID_PUBLIC, VAPID_PRIVATE);
+}
+
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: { removeUndefinedValues: true },
 });
 const ses = new SESv2Client({});
 const PAGE = readFileSync(new URL("./page.html", import.meta.url), "utf8");
+const SW = readFileSync(new URL("./sw.js", import.meta.url), "utf8");
+const MANIFEST = readFileSync(new URL("./manifest.webmanifest", import.meta.url), "utf8");
+const ICON = readFileSync(new URL("./icon.png", import.meta.url)).toString("base64");
 
 /* ---------- auth ---------- */
 
@@ -45,7 +59,11 @@ function verify(token) {
 
 /* ---------- data ---------- */
 
-async function allTodos() {
+// Push subscriptions live in the same table under a "sub#" id prefix, so every
+// read has to pick a side. The table is tiny; a scan is the right tool.
+const SUB = "sub#";
+
+async function scanAll() {
   const items = [];
   let key;
   do {
@@ -55,6 +73,11 @@ async function allTodos() {
   } while (key);
   return items;
 }
+
+const allTodos = async () => (await scanAll()).filter((i) => !i.id.startsWith(SUB));
+const allSubs = async () => (await scanAll()).filter((i) => i.id.startsWith(SUB));
+const subId = (endpoint) =>
+  SUB + crypto.createHash("sha256").update(endpoint).digest("hex").slice(0, 32);
 
 const clean = (s, max) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
@@ -142,6 +165,35 @@ async function api(op, body) {
       await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { id: body.id } }));
       return { ok: true };
 
+    case "pushStatus":
+      return { enabled: PUSH_ON, key: VAPID_PUBLIC, subs: PUSH_ON ? (await allSubs()).length : 0 };
+
+    case "subscribe": {
+      const sub = body.sub;
+      if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) return { error: "bad subscription" };
+      await ddb.send(new PutCommand({ TableName: TABLE, Item: {
+        id: subId(sub.endpoint),
+        endpoint: sub.endpoint,
+        keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
+        device: clean(body.device, 200) || undefined,
+        createdAt: new Date().toISOString(),
+      } }));
+      return { ok: true, subs: (await allSubs()).length };
+    }
+
+    case "unsubscribe": {
+      if (!body.endpoint) return { error: "no endpoint" };
+      await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { id: subId(body.endpoint) } }));
+      return { ok: true };
+    }
+
+    case "testPush":
+      return sendPush({
+        title: "Todo",
+        body: "Push notifications are working.",
+        tag: "todo-test",
+      });
+
     case "clearDone": {
       const done = (await allTodos()).filter((t) => t.done);
       for (const t of done) {
@@ -166,15 +218,9 @@ const fmt = (iso) => {
   } catch { return iso; }
 };
 
-async function sweep() {
-  const now = Date.now();
-  const due = (await allTodos()).filter(
-    (t) => !t.done && !t.notified && t.remindAt && new Date(t.remindAt).getTime() <= now,
-  );
-  if (!due.length) return { sent: 0 };
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
-  due.sort((a, b) => a.remindAt.localeCompare(b.remindAt));
-  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+async function sendEmail(due) {
   const subject = due.length === 1
     ? `Todo due: ${due[0].text.slice(0, 80)}`
     : `${due.length} todos due`;
@@ -195,6 +241,64 @@ async function sweep() {
       Body: { Text: { Data: `These todos are due:\n\n${lines.join("\n")}\n` }, Html: { Data: html } },
     } },
   }));
+  return { sent: due.length };
+}
+
+// Browsers hand back 404/410 once a subscription is dead — that is the only
+// signal we get that a device is gone, so prune on it.
+async function sendPush(payload) {
+  if (!PUSH_ON) return { sent: 0, reason: "push disabled" };
+  const subs = await allSubs();
+  if (!subs.length) return { sent: 0, reason: "no subscriptions" };
+
+  const results = await Promise.allSettled(subs.map((s) =>
+    webpush.sendNotification(
+      { endpoint: s.endpoint, keys: s.keys }, JSON.stringify(payload), { TTL: 12 * 3600 })));
+
+  const stale = [];
+  let sent = 0;
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") { sent++; return; }
+    const code = r.reason?.statusCode;
+    if (code === 404 || code === 410) stale.push(subs[i].id);
+    else console.error("push failed", code, r.reason?.body || r.reason?.message);
+  });
+  for (const id of stale) {
+    await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { id } }));
+  }
+  return { sent, removed: stale.length };
+}
+
+async function sweep() {
+  const now = Date.now();
+  const due = (await allTodos()).filter(
+    (t) => !t.done && !t.notified && t.remindAt && new Date(t.remindAt).getTime() <= now,
+  );
+  if (!due.length) return { due: 0 };
+  due.sort((a, b) => a.remindAt.localeCompare(b.remindAt));
+
+  const out = { due: due.length };
+  let delivered = false;
+
+  if (EMAIL_ON) {
+    try { out.email = await sendEmail(due); delivered = true; }
+    catch (err) { console.error("email failed", err); out.email = { error: String(err.message || err) }; }
+  }
+  if (PUSH_ON) {
+    try {
+      out.push = await sendPush({
+        title: due.length === 1 ? due[0].text.slice(0, 80) : `${due.length} todos due`,
+        body: due.length === 1
+          ? [fmt(due[0].remindAt), due[0].notes].filter(Boolean).join(" — ")
+          : due.map((t) => `• ${t.text}`).join("\n"),
+        tag: "todo-due",
+      });
+      if (out.push.sent > 0) delivered = true;
+    } catch (err) { console.error("push failed", err); out.push = { error: String(err.message || err) }; }
+  }
+
+  // Leave `notified` alone if nothing got through, so the next sweep retries.
+  if (!delivered) { out.retrying = true; return out; }
 
   for (const t of due) {
     await ddb.send(new UpdateCommand({
@@ -203,7 +307,8 @@ async function sweep() {
       ExpressionAttributeValues: { ":true": true },
     }));
   }
-  return { sent: due.length, ids: due.map((t) => t.id) };
+  out.ids = due.map((t) => t.id);
+  return out;
 }
 
 /* ---------- handler ---------- */
@@ -219,6 +324,33 @@ export const handler = async (event) => {
 
   const method = event.requestContext?.http?.method || "GET";
   const path = event.rawPath || "/";
+
+  if (method === "GET" && path === "/sw.js") {
+    return {
+      statusCode: 200,
+      // The scope header lets a worker served from / control the whole origin.
+      headers: { "content-type": "text/javascript", "cache-control": "no-store",
+                 "service-worker-allowed": "/" },
+      body: SW,
+    };
+  }
+
+  if (method === "GET" && path === "/manifest.webmanifest") {
+    return {
+      statusCode: 200,
+      headers: { "content-type": "application/manifest+json", "cache-control": "max-age=3600" },
+      body: MANIFEST,
+    };
+  }
+
+  if (method === "GET" && path === "/icon.png") {
+    return {
+      statusCode: 200,
+      headers: { "content-type": "image/png", "cache-control": "max-age=86400" },
+      body: ICON,
+      isBase64Encoded: true,
+    };
+  }
 
   if (method === "GET" && path !== "/api") {
     return {
@@ -254,6 +386,7 @@ export const handler = async (event) => {
       token: sign({ exp: Date.now() + TOKEN_DAYS * 864e5 }),
       todos: await allTodos(),
       tz: TIMEZONE,
+      push: { enabled: PUSH_ON, key: VAPID_PUBLIC },
     });
   }
 
