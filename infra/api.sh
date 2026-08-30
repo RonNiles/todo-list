@@ -24,7 +24,7 @@ CFG="infra/config.$NAME.env"
 [ -f "$CFG" ] || { echo "no such config: $CFG" >&2; exit 1; }
 set -a; . "$CFG"; set +a
 PROFILE="${PROFILE:-}"
-AWSR=(aws ${PROFILE:+--profile "$PROFILE"} --region "$REGION" --output json)
+AWSR=(aws ${PROFILE:+--profile "$PROFILE"} --region "$REGION" --output json --no-cli-pager)
 TOKFILE=".token.$NAME"
 
 # ---------- endpoint ----------
