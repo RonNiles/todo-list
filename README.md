@@ -4,7 +4,7 @@ A one-person todo list you host yourself: a web page that works on a phone or a
 laptop, no app to install, no third party holding your data, and email reminders.
 
 One Lambda serves both the UI and the JSON API, DynamoDB stores the items, and an
-EventBridge schedule wakes the Lambda every 15 minutes to email whatever is due.
+EventBridge schedule wakes the Lambda every 5 minutes to send whatever is due.
 
 This repo deploys **any number of independent lists**, each in its own AWS account,
 each with its own config file, URL, passphrase, and data:
@@ -201,7 +201,7 @@ Sample output:
     http:      200 in 0.398461s
     items:     0
     ses:       True
-    schedule:  rate(15 minutes)     ENABLED
+    schedule:  rate(5 minutes)      ENABLED
 
     open items:
     [ ]  3a704b50    Aug 27, 9:30 PM  Watch training video
@@ -389,8 +389,20 @@ browser sessions survive; changing `TOKEN_SECRET` too logs every device out.
 An item may carry one `remindAt`. Every sweep emails the items that are due, not
 done, and not yet notified — batched into a single message — then marks them
 notified. Editing `remindAt` clears that flag so it fires again. Worst-case lag is
-the sweep interval, so with the default `rate(15 minutes)` a 3:05 reminder arrives by
-3:15. Tighten it with `SWEEP` in the config if you want.
+the sweep interval, so with the default `rate(5 minutes)` a 3:03 reminder arrives by
+3:05. Tighten it with `SWEEP` in the config.
+
+Polling harder is cheaper than it looks, because the sweep is one scan of a tiny
+table and an empty one bills a couple of milliseconds once the container is warm.
+Even `rate(1 minute)` — 43,200 invocations a month — stays inside the Lambda request
+and compute allowances; the only real charge is DynamoDB read units, around
+$0.003/month at that cadence, scaling with how many items you keep. Frequent polling
+also keeps the function warm, which takes the ~360 ms cold start off your page loads.
+
+Exact-to-the-second delivery would mean a one-shot EventBridge Scheduler entry per
+reminder. That is also free, but it adds an IAM role and a lifecycle to get wrong —
+schedules outliving their todo, or a failed delete firing a phantom notification.
+Polling has neither failure mode.
 
 ### Guardrails
 
