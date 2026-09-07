@@ -91,13 +91,16 @@ pretty() { node -e '
       const s = d.toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
       return (!t.done && d < now ? "! " : "  ") + s + (t.notified ? " (sent)" : "");
     };
+    const doneWhen = t => t.doneAt
+      ? "  (done " + new Date(t.doneAt).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) + ")"
+      : "";
     const w = Math.max(...todos.map(t=>when(t).length), 4);
     for(const t of todos){
       console.log([
         t.done ? "[x]" : "[ ]",
         t.id.slice(0,8),
         when(t).padEnd(w),
-        t.text + (t.notes ? "  — " + t.notes : ""),
+        t.text + (t.notes ? "  — " + t.notes : "") + doneWhen(t),
       ].join("  "));
     }
     const open = todos.filter(t=>!t.done).length;

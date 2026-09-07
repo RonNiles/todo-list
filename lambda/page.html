@@ -218,6 +218,7 @@ function replaceTodo(id, fresh) {
 
 function row(t) {
   const d = t.remindAt ? relDue(t.remindAt) : null;
+  const doneWhen = t.done && t.doneAt ? relDue(t.doneAt).label : null;
   return `<li class="${t.done ? "done" : ""}" data-id="${t.id}">
     <button class="box" data-act="toggle" aria-label="toggle">✓</button>
     <div class="mid">
@@ -226,6 +227,7 @@ function row(t) {
       <div class="meta">
         <button class="due ${d ? d.cls : "none"}" data-act="due">${d ? esc(d.label) : "+ remind me"}</button>
         ${t.notes ? "" : `<button class="due none" data-act="note">+ note</button>`}
+        ${doneWhen ? `<span class="due none">done ${esc(doneWhen)}</span>` : ""}
       </div>
     </div>
     <button class="del" data-act="del" aria-label="delete">×</button>
