@@ -26,8 +26,11 @@ set -a; . "$CFG"; set +a
 PROFILE="${PROFILE:-}"
 AWSR=(aws ${PROFILE:+--profile "$PROFILE"} --region "$REGION" --output json --no-cli-pager)
 TOKFILE=".token.$NAME"
+ENDPOINTFILE=".endpoint.$NAME"
 
 # ---------- endpoint ----------
+# deploy.sh writes the current URL to ENDPOINTFILE on every deploy, so this
+# discovery (a handful of slow `aws` calls) only runs before that file exists.
 endpoint() {
   local u
   u=$("${AWSR[@]}" lambda get-function-url-config --function-name "$APP" \
@@ -40,7 +43,13 @@ endpoint() {
   fi
   echo "${u%/}"
 }
-URL="${TODO_URL:-$(endpoint)}"
+if [ -n "${TODO_URL:-}" ]; then
+  URL="$TODO_URL"
+elif [ -s "$ENDPOINTFILE" ]; then
+  URL=$(cat "$ENDPOINTFILE")
+else
+  URL=$(endpoint); printf '%s' "$URL" > "$ENDPOINTFILE"
+fi
 
 # ---------- auth ----------
 login() {
@@ -138,14 +147,25 @@ case "$CMD" in
   state)  echo "list:      $NAME ($CFG)"
           echo "account:   ${ACCOUNT:-?}  region: $REGION  app: $APP"
           echo "endpoint:  $URL"
-          echo -n "http:      "; curl -s -o /dev/null -w '%{http_code} in %{time_total}s\n' "$URL/"
-          echo -n "items:     "; "${AWSR[@]}" dynamodb describe-table --table-name "$APP" \
-            --query 'Table.ItemCount' --output text
-          echo -n "ses:       "; "${AWSR[@]}" sesv2 get-email-identity --email-identity "$EMAIL" \
-            --query VerifiedForSendingStatus --output text 2>/dev/null || echo "not registered"
-          echo -n "schedule:  "; "${AWSR[@]}" events list-rules --name-prefix "$APP-sweep" \
-            --query 'Rules[0].[ScheduleExpression,State]' --output text
-          echo; echo "open items:"; call '{"op":"list"}' | pretty;;
+
+          TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+          curl -s -o /dev/null -w '%{http_code} in %{time_total}s\n' "$URL/" \
+            > "$TMP/http" &
+          "${AWSR[@]}" dynamodb describe-table --table-name "$APP" \
+            --query 'Table.ItemCount' --output text > "$TMP/items" &
+          ( "${AWSR[@]}" sesv2 get-email-identity --email-identity "$EMAIL" \
+              --query VerifiedForSendingStatus --output text 2>/dev/null \
+              || echo "not registered" ) > "$TMP/ses" &
+          "${AWSR[@]}" events list-rules --name-prefix "$APP-sweep" \
+            --query 'Rules[0].[ScheduleExpression,State]' --output text > "$TMP/schedule" &
+          call '{"op":"list"}' > "$TMP/list" &
+          wait
+
+          echo -n "http:      "; cat "$TMP/http"
+          echo -n "items:     "; cat "$TMP/items"
+          echo -n "ses:       "; cat "$TMP/ses"
+          echo -n "schedule:  "; cat "$TMP/schedule"
+          echo; echo "open items:"; pretty < "$TMP/list";;
   help|*)
     cat <<EOF
 usage: ./infra/api.sh [list-name] <command>     (list-name defaults to 'work')

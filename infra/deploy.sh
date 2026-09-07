@@ -258,6 +258,7 @@ case "$FRONTDOOR" in
   *) die "FRONTDOOR must be auto, url or apigw (got '$FRONTDOOR')";;
 esac
 echo "  $URL"
+printf '%s' "$URL" > ".endpoint.$NAME"
 
 # ---------- 6. SES ----------
 say "SES sender $EMAIL"

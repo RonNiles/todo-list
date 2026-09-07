@@ -37,4 +37,5 @@ API_ID=$("${AWSR[@]}" apigatewayv2 get-apis --query "Items[?Name=='$APP'].ApiId 
 "${AWSP[@]}" iam detach-role-policy --role-name "$APP-lambda" \
   --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole >/dev/null 2>&1
 "${AWSP[@]}" iam delete-role --role-name "$APP-lambda" >/dev/null 2>&1
+rm -f ".endpoint.$NAME" ".token.$NAME"
 echo "deleted. (SES identity and /aws/lambda/$APP logs left in place)"

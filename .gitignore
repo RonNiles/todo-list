@@ -4,3 +4,4 @@ build.zip
 infra/config.*.env
 !infra/config.example.env
 .token.*
+.endpoint.*
