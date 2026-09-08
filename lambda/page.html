@@ -66,8 +66,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
 ul{list-style:none; margin:0 0 8px; padding:0}
 li{display:flex; align-items:flex-start; gap:10px; padding:11px 12px; background:var(--card);
    border:1px solid var(--line); border-radius:var(--radius); margin-bottom:8px}
-li.done{opacity:.5}
-li.done .txt{text-decoration:line-through}
+li.done .txt{text-decoration:line-through; opacity:.5}
 .box{flex:0 0 24px; height:24px; margin-top:1px; border:2px solid var(--line);
      border-radius:7px; display:grid; place-items:center; color:transparent; font-size:14px}
 li.done .box{border-color:var(--ok); color:var(--ok); background:transparent}
@@ -79,9 +78,11 @@ li.done .box{border-color:var(--ok); color:var(--ok); background:transparent}
 .due.overdue{color:var(--danger); border-color:currentColor}
 .due.soon{color:var(--warn); border-color:currentColor}
 .due.none{color:var(--dim); opacity:.65}
+.due.done-time{color:var(--ok); border-color:currentColor; font-weight:600}
+li.done .due:not(.done-time){opacity:.5}
 .note{font-size:14px; color:var(--dim); white-space:pre-wrap; word-break:break-word;
       margin-top:4px; cursor:text}
-li.done .note{text-decoration:line-through}
+li.done .note{text-decoration:line-through; opacity:.5}
 textarea.noteedit{margin-top:4px; font-size:14px; min-height:56px; resize:vertical;
                   line-height:1.4; display:block}
 .del{flex:0 0 32px; height:32px; color:var(--dim); font-size:20px; line-height:1; border-radius:8px}
@@ -219,15 +220,16 @@ function replaceTodo(id, fresh) {
 function row(t) {
   const d = t.remindAt ? relDue(t.remindAt) : null;
   const doneWhen = t.done && t.doneAt ? relDue(t.doneAt).label : null;
+  const dueChip = `<button class="due ${d ? d.cls : "none"}" data-act="due">${d ? esc(d.label) : "+ remind me"}</button>`;
+  const doneChip = doneWhen ? `<span class="due done-time">done ${esc(doneWhen)}</span>` : "";
   return `<li class="${t.done ? "done" : ""}" data-id="${t.id}">
     <button class="box" data-act="toggle" aria-label="toggle">✓</button>
     <div class="mid">
       <span class="txt" data-act="edit">${esc(t.text)}</span>
       ${t.notes ? `<div class="note" data-act="note">${esc(t.notes)}</div>` : ""}
       <div class="meta">
-        <button class="due ${d ? d.cls : "none"}" data-act="due">${d ? esc(d.label) : "+ remind me"}</button>
+        ${doneChip}${dueChip}
         ${t.notes ? "" : `<button class="due none" data-act="note">+ note</button>`}
-        ${doneWhen ? `<span class="due none">done ${esc(doneWhen)}</span>` : ""}
       </div>
     </div>
     <button class="del" data-act="del" aria-label="delete">×</button>
