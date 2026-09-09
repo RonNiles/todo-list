@@ -86,12 +86,17 @@ li.done .note{text-decoration:line-through; opacity:.5}
 textarea.noteedit{margin-top:4px; font-size:14px; min-height:56px; resize:vertical;
                   line-height:1.4; display:block}
 .del{flex:0 0 32px; height:32px; color:var(--dim); font-size:20px; line-height:1; border-radius:8px}
+.cxl{flex:0 0 32px; height:32px; color:var(--dim); font-size:18px; line-height:1;
+     border-radius:8px; opacity:.7; margin-right:2px}
 .sec{font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim);
      margin:20px 4px 8px; display:flex; justify-content:space-between; align-items:center}
 .empty{text-align:center; color:var(--dim); padding:36px 12px; font-size:15px}
 #err{position:fixed; left:50%; transform:translateX(-50%); bottom:20px; max-width:90vw;
      background:var(--danger); color:#fff; padding:10px 16px; border-radius:var(--radius);
      font-size:14px; display:none; z-index:9}
+#err.info{background:var(--fg); color:var(--bg)}
+#err button{margin-left:14px; color:inherit; font-weight:700; text-decoration:underline;
+            padding:2px 2px; min-height:0}
 .hide{display:none !important}
 .editing input{margin:0}
 </style>
@@ -142,9 +147,24 @@ const $ = (s) => document.querySelector(s);
 let todos = [];
 let token = localStorage.getItem("todo_token") || "";
 
-function toast(msg) {
-  const e = $("#err"); e.textContent = msg; e.style.display = "block";
-  clearTimeout(toast._t); toast._t = setTimeout(() => (e.style.display = "none"), 3500);
+// action = { label, fn }; given one, the toast turns neutral and lingers so the
+// button is actually reachable.
+function toast(msg, action) {
+  const e = $("#err");
+  e.textContent = msg;                 // also clears any previous action button
+  e.classList.toggle("info", !!action);
+  if (action) {
+    const b = document.createElement("button");
+    b.textContent = action.label;
+    b.addEventListener("click", async () => {
+      e.style.display = "none"; clearTimeout(toast._t);
+      try { await action.fn(); } catch (err) { toast(err.message); }
+    });
+    e.appendChild(b);
+  }
+  e.style.display = "block";
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => (e.style.display = "none"), action ? 8000 : 3500);
 }
 
 async function call(payload) {
@@ -191,8 +211,9 @@ function relDue(iso) {
 /* ---------- render ---------- */
 
 function render() {
-  const open = todos.filter((t) => !t.done);
-  const done = todos.filter((t) => t.done);
+  const visible = todos.filter((t) => !t.cancelled);
+  const open = visible.filter((t) => !t.done);
+  const done = visible.filter((t) => t.done);
   const key = (t) => (t.remindAt ? new Date(t.remindAt).getTime() : 8.64e15);
   open.sort((a, b) => key(a) - key(b) || (a.createdAt || "").localeCompare(b.createdAt || ""));
   done.sort((a, b) => (b.doneAt || "").localeCompare(a.doneAt || ""));
@@ -232,6 +253,7 @@ function row(t) {
         ${t.notes ? "" : `<button class="due none" data-act="note">+ note</button>`}
       </div>
     </div>
+    <button class="cxl" data-act="cancel" aria-label="cancel">⊘</button>
     <button class="del" data-act="del" aria-label="delete">×</button>
   </li>`;
 }
@@ -253,6 +275,17 @@ document.addEventListener("click", async (e) => {
   if (btn.dataset.act === "del") {
     todos = todos.filter((x) => x.id !== id); render();
     try { await call({ op: "delete", id }); } catch (err) { toast(err.message); await refresh(); }
+  }
+
+  if (btn.dataset.act === "cancel") {
+    todos = todos.filter((x) => x.id !== id); render();
+    try {
+      await call({ op: "update", id, cancelled: true });
+      toast("Cancelled", { label: "Undo", fn: async () => {
+        await call({ op: "update", id, cancelled: false });
+        await refresh();
+      } });
+    } catch (err) { toast(err.message); await refresh(); }
   }
 
   if (btn.dataset.act === "due") {

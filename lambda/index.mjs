@@ -76,6 +76,9 @@ async function scanAll() {
 
 const allTodos = async () => (await scanAll()).filter((i) => !i.id.startsWith(SUB));
 const allSubs = async () => (await scanAll()).filter((i) => i.id.startsWith(SUB));
+// Cancelled items stay in the table forever but are archived: no reminders, and
+// invisible to the web UI. Everything except the shell client reads this view.
+const activeTodos = async () => (await allTodos()).filter((t) => !t.cancelled);
 const subId = (endpoint) =>
   SUB + crypto.createHash("sha256").update(endpoint).digest("hex").slice(0, 32);
 
@@ -97,7 +100,7 @@ function normRemind(v) {
 async function api(op, body) {
   switch (op) {
     case "list":
-      return { todos: await allTodos() };
+      return { todos: body.includeCancelled ? await allTodos() : await activeTodos() };
 
     case "create": {
       const text = clean(body.text, 500);
@@ -131,6 +134,11 @@ async function api(op, body) {
         sets.done = !!body.done;
         sets.doneAt = body.done ? new Date().toISOString() : undefined;
         if (!body.done) { delete sets.doneAt; removes.push("doneAt"); }
+      }
+      if ("cancelled" in body) {
+        sets.cancelled = !!body.cancelled;
+        sets.cancelledAt = body.cancelled ? new Date().toISOString() : undefined;
+        if (!body.cancelled) { delete sets.cancelledAt; removes.push("cancelledAt"); }
       }
       if ("remindAt" in body) {
         const r = normRemind(body.remindAt);
@@ -195,7 +203,7 @@ async function api(op, body) {
       });
 
     case "clearDone": {
-      const done = (await allTodos()).filter((t) => t.done);
+      const done = (await activeTodos()).filter((t) => t.done);
       for (const t of done) {
         await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { id: t.id } }));
       }
@@ -272,7 +280,8 @@ async function sendPush(payload) {
 async function sweep() {
   const now = Date.now();
   const due = (await allTodos()).filter(
-    (t) => !t.done && !t.notified && t.remindAt && new Date(t.remindAt).getTime() <= now,
+    (t) => !t.done && !t.cancelled && !t.notified &&
+           t.remindAt && new Date(t.remindAt).getTime() <= now,
   );
   if (!due.length) return { due: 0 };
   due.sort((a, b) => a.remindAt.localeCompare(b.remindAt));
@@ -384,7 +393,7 @@ export const handler = async (event) => {
     }
     return json(200, {
       token: sign({ exp: Date.now() + TOKEN_DAYS * 864e5 }),
-      todos: await allTodos(),
+      todos: await activeTodos(),
       tz: TIMEZONE,
       push: { enabled: PUSH_ON, key: VAPID_PUBLIC },
     });

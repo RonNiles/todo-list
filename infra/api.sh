@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NAME=work
-KNOWN=" url token list json raw add done rm table sweep env logs state push testpush help -h --help "
+KNOWN=" url token list json raw add done rm cancel uncancel table sweep env logs state push testpush help -h --help "
 if [ $# -gt 0 ] && [ -n "$1" ] && [[ "$KNOWN" != *" $1 "* ]]; then
   NAME="$1"; shift
   [ -f "infra/config.$NAME.env" ] || {
@@ -76,6 +76,17 @@ call() {
   printf '%s' "$out"
 }
 
+# Resolve an id prefix to exactly one id. Pass anything as $2 to search the
+# cancelled archive too — uncancel needs that, the others deliberately do not.
+resolve_id() {
+  local list='{"op":"list"}'
+  [ -n "${2:-}" ] && list='{"op":"list","includeCancelled":true}'
+  call "$list" | ID="$1" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const m=JSON.parse(s).todos.filter(t=>t.id.startsWith(process.env.ID));
+    if(m.length!==1){console.error(m.length?"ambiguous prefix":"no match");process.exit(1)}
+    console.log(m[0].id)})'
+}
+
 pretty() { node -e '
   let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
     let j; try{ j=JSON.parse(s) }catch{ console.log(s); return }
@@ -83,7 +94,8 @@ pretty() { node -e '
     if(!todos){ console.log(JSON.stringify(j,null,2)); return }
     if(!todos.length){ console.log("(empty)"); return }
     const key = t => t.remindAt ? Date.parse(t.remindAt) : 8.64e15;
-    todos.sort((a,b)=> (a.done?1:0)-(b.done?1:0) || key(a)-key(b));
+    const rank = t => t.cancelled ? 2 : t.done ? 1 : 0;
+    todos.sort((a,b)=> rank(a)-rank(b) || key(a)-key(b));
     const now = Date.now();
     const when = t => {
       if(!t.remindAt) return "";
@@ -91,28 +103,31 @@ pretty() { node -e '
       const s = d.toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
       return (!t.done && d < now ? "! " : "  ") + s + (t.notified ? " (sent)" : "");
     };
-    const doneWhen = t => t.doneAt
-      ? "  (done " + new Date(t.doneAt).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) + ")"
-      : "";
+    const stamp = (label, iso) => "  (" + label + " " +
+      new Date(iso).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) + ")";
+    const doneWhen = t => t.cancelled && t.cancelledAt ? stamp("cancelled", t.cancelledAt)
+      : t.doneAt ? stamp("done", t.doneAt) : "";
     const w = Math.max(...todos.map(t=>when(t).length), 4);
     for(const t of todos){
       console.log([
-        t.done ? "[x]" : "[ ]",
+        t.cancelled ? "[-]" : t.done ? "[x]" : "[ ]",
         t.id.slice(0,8),
         when(t).padEnd(w),
         t.text + (t.notes ? "  — " + t.notes : "") + doneWhen(t),
       ].join("  "));
     }
-    const open = todos.filter(t=>!t.done).length;
-    console.log(`\n${todos.length} item(s), ${open} open`);
+    const open = todos.filter(t=>!t.done && !t.cancelled).length;
+    const cancelled = todos.filter(t=>t.cancelled).length;
+    console.log(`\n${todos.length} item(s), ${open} open` +
+      (cancelled ? `, ${cancelled} cancelled` : ""));
   });'
 }
 
 case "$CMD" in
   url)    echo "$URL";;
   token)  token; echo;;
-  list)   call '{"op":"list"}' | pretty;;
-  json)   call '{"op":"list"}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(JSON.parse(s),null,2)))';;
+  list)   call '{"op":"list","includeCancelled":true}' | pretty;;
+  json)   call '{"op":"list","includeCancelled":true}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(JSON.parse(s),null,2)))';;
   raw)    [ $# -ge 1 ] || { echo 'usage: raw '"'"'{"op":"list"}'"'"'' >&2; exit 1; }
           call "$1" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.stringify(JSON.parse(s),null,2))}catch{console.log(s)}})';;
   add)    [ $# -ge 1 ] || { echo 'usage: add "text" ["2026-09-01 17:00"]' >&2; exit 1; }
@@ -122,17 +137,17 @@ case "$CMD" in
             console.log(JSON.stringify({op:"create", text:process.env.TEXT, remindAt:when}));')
           call "$B" | pretty;;
   done)   [ $# -ge 1 ] || { echo "usage: done <id-prefix>" >&2; exit 1; }
-          ID=$(call '{"op":"list"}' | ID="$1" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-            const m=JSON.parse(s).todos.filter(t=>t.id.startsWith(process.env.ID));
-            if(m.length!==1){console.error(m.length?"ambiguous prefix":"no match");process.exit(1)}
-            console.log(m[0].id)})')
+          ID=$(resolve_id "$1") || exit 1
           call "{\"op\":\"update\",\"id\":\"$ID\",\"done\":true}" | pretty;;
   rm)     [ $# -ge 1 ] || { echo "usage: rm <id-prefix>" >&2; exit 1; }
-          ID=$(call '{"op":"list"}' | ID="$1" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-            const m=JSON.parse(s).todos.filter(t=>t.id.startsWith(process.env.ID));
-            if(m.length!==1){console.error(m.length?"ambiguous prefix":"no match");process.exit(1)}
-            console.log(m[0].id)})')
+          ID=$(resolve_id "$1" all) || exit 1
           call "{\"op\":\"delete\",\"id\":\"$ID\"}"; echo;;
+  cancel) [ $# -ge 1 ] || { echo "usage: cancel <id-prefix>" >&2; exit 1; }
+          ID=$(resolve_id "$1" all) || exit 1   # idempotent: re-cancelling is a no-op
+          call "{\"op\":\"update\",\"id\":\"$ID\",\"cancelled\":true}" | pretty;;
+  uncancel) [ $# -ge 1 ] || { echo "usage: uncancel <id-prefix>" >&2; exit 1; }
+          ID=$(resolve_id "$1" all) || exit 1
+          call "{\"op\":\"update\",\"id\":\"$ID\",\"cancelled\":false}" | pretty;;
   push)   call '{"op":"pushStatus"}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
             const j=JSON.parse(s);
             console.log("push:  " + (j.enabled ? "enabled" : "disabled (CHANNELS has no push, or no VAPID keys)"));
@@ -161,7 +176,7 @@ case "$CMD" in
               || echo "not registered" ) > "$TMP/ses" &
           "${AWSR[@]}" events list-rules --name-prefix "$APP-sweep" \
             --query 'Rules[0].[ScheduleExpression,State]' --output text > "$TMP/schedule" &
-          call '{"op":"list"}' > "$TMP/list" &
+          call '{"op":"list","includeCancelled":true}' > "$TMP/list" &
           wait
 
           echo -n "http:      "; cat "$TMP/http"
@@ -187,6 +202,8 @@ inspect
 change
   add "text" ["2026-09-01 17:00"]
   done <id-prefix>
+  cancel <id-prefix>               archive it: no reminders, hidden from the web UI
+  uncancel <id-prefix>             bring it back
   rm <id-prefix>
   raw '{"op":"clearDone"}'          any API call, verbatim
   sweep                            force the reminder run now

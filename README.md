@@ -157,7 +157,8 @@ Everything is inline — there is no detail view or modal.
 | tap the date chip | set or change the reminder; clear the field to remove it |
 | tap **+ note**, or an existing note | edit notes — tap away or ⌘/Ctrl+Enter saves, Esc cancels |
 | tap 🔔 in the header | turn notifications on or off for this device |
-| tap **×** | delete |
+| tap **⊘** | cancel — archived: no more reminders, gone from the UI, kept in the table |
+| tap **×** | delete permanently |
 | **Clear** under Completed | delete every completed item |
 
 Notes keep their line breaks and show under the item text, greyed; reminder emails
@@ -189,6 +190,8 @@ Changes, for when the browser is not to hand:
     ./infra/api.sh add "Renew domain" "2026-09-01 09:00"
     ./infra/api.sh done 3a70                    # id prefix, must be unambiguous
     ./infra/api.sh rm 3a70
+    ./infra/api.sh cancel 3a70                  # archive it
+    ./infra/api.sh uncancel 3a70                # bring it back
     ./infra/api.sh raw '{"op":"clearDone"}'     # any call, verbatim
     ./infra/api.sh sweep                        # run the reminder pass now
 
@@ -208,7 +211,8 @@ Sample output:
     [x]  9c1f22ab                     Book flights
     [ ]  5e880d3f  ! Aug 26, 2:00 PM  Ping vendor about SLA (sent)
 
-`!` marks overdue, `(sent)` means the reminder email already went out.
+`!` marks overdue, `(sent)` means the reminder already went out. `[ ]` is open,
+`[x]` done, `[-]` cancelled.
 
 The `items:` line comes from DynamoDB's `ItemCount`, which AWS refreshes roughly
 every six hours — it lags, and reads 0 on a young table. The list under it is live.
@@ -231,9 +235,9 @@ field selects the operation. Every op except `login` needs a bearer token.
 | Body | Returns |
 |---|---|
 | `{"op":"login","password":"…"}` | `{token, todos, tz}` — the one unauthenticated op |
-| `{"op":"list"}` | `{todos:[…]}` |
+| `{"op":"list","includeCancelled":true}` | `{todos:[…]}` — the flag is optional and defaults to false, which omits cancelled items |
 | `{"op":"create","text":"…","remindAt":"2026-09-01T17:00:00Z","notes":"…"}` | `{todo}` — `remindAt` and `notes` optional |
-| `{"op":"update","id":"…", …}` | `{todo}` — send any of `text`, `done`, `remindAt`, `notes` |
+| `{"op":"update","id":"…", …}` | `{todo}` — send any of `text`, `done`, `cancelled`, `remindAt`, `notes` |
 | `{"op":"delete","id":"…"}` | `{ok:true}` |
 | `{"op":"clearDone"}` | `{removed:n}` |
 | `{"op":"pushStatus"}` | `{enabled, key, subs}` — `key` is the VAPID public key |
@@ -254,6 +258,8 @@ A stored item looks like:
       "notes":     "receipts are in Dropbox",     // optional
       "done":      false,
       "doneAt":    "2026-08-27T21:49:02.412Z",    // only when done
+      "cancelled": true,                          // only when cancelled
+      "cancelledAt": "2026-09-09T16:12:04.881Z",  // only when cancelled
       "remindAt":  "2026-09-02T00:00:00.000Z",    // optional
       "notified":  false,                          // true once emailed
       "createdAt": "2026-08-27T21:48:44.623Z"
@@ -383,6 +389,26 @@ a throttle to the API Gateway stage or put the Function URL behind CloudFront.
 
 To rotate the passphrase, edit `PASSWORD` in the config and redeploy. Existing
 browser sessions survive; changing `TOKEN_SECRET` too logs every device out.
+
+### Cancelling
+
+An item has three fates: checked off, cancelled, or deleted. **Cancelled means
+archived** — the row stays in DynamoDB indefinitely with `cancelled: true` and a
+`cancelledAt` stamp, stops matching the reminder sweep, and vanishes from the web
+UI. The `list` op omits cancelled items unless asked for them, so they never even
+reach the browser; `infra/api.sh` always asks, which makes the shell client the
+place you go to see or restore the archive:
+
+    ./infra/api.sh list             # [-] rows are cancelled
+    ./infra/api.sh uncancel 3a70    # back to open, reminder re-arms if still due
+
+Cancelling leaves `notified` alone. An item cancelled with a reminder still
+pending, then uncancelled after its time has passed, fires on the next sweep
+rather than being silently swallowed.
+
+`Clear` under Completed and the `clearDone` op only touch items that are done and
+not cancelled, so nothing archived is ever destroyed by a bulk action. To purge
+one for real, `./infra/api.sh rm <prefix>` still works on cancelled items.
 
 ### Reminder semantics
 
