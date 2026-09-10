@@ -79,6 +79,7 @@ li.done .box{border-color:var(--ok); color:var(--ok); background:transparent}
 .due.soon{color:var(--warn); border-color:currentColor}
 .due.none{color:var(--dim); opacity:.65}
 .due.done-time{color:var(--ok); border-color:currentColor; font-weight:600}
+.due.series{padding:3px 7px; opacity:.8; cursor:default}
 li.done .due:not(.done-time){opacity:.5}
 .note{font-size:14px; color:var(--dim); white-space:pre-wrap; word-break:break-word;
       margin-top:4px; cursor:text}
@@ -243,13 +244,14 @@ function row(t) {
   const doneWhen = t.done && t.doneAt ? relDue(t.doneAt).label : null;
   const dueChip = `<button class="due ${d ? d.cls : "none"}" data-act="due">${d ? esc(d.label) : "+ remind me"}</button>`;
   const doneChip = doneWhen ? `<span class="due done-time">done ${esc(doneWhen)}</span>` : "";
+  const seriesBadge = t.seriesId ? `<span class="due series" title="part of a recurring series">🔁</span>` : "";
   return `<li class="${t.done ? "done" : ""}" data-id="${t.id}">
     <button class="box" data-act="toggle" aria-label="toggle">✓</button>
     <div class="mid">
       <span class="txt" data-act="edit">${esc(t.text)}</span>
       ${t.notes ? `<div class="note" data-act="note">${esc(t.notes)}</div>` : ""}
       <div class="meta">
-        ${doneChip}${dueChip}
+        ${doneChip}${dueChip}${seriesBadge}
         ${t.notes ? "" : `<button class="due none" data-act="note">+ note</button>`}
       </div>
     </div>

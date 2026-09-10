@@ -244,6 +244,9 @@ field selects the operation. Every op except `login` needs a bearer token.
 | `{"op":"subscribe","sub":{…},"device":"…"}` | `{ok:true, subs:n}` — `sub` is `PushSubscription.toJSON()` |
 | `{"op":"unsubscribe","endpoint":"…"}` | `{ok:true}` |
 | `{"op":"testPush"}` | `{sent:n, removed:n}` |
+| `{"op":"seriesCreate","kind":"cron"\|"after", …}` | `{series, todo}` — `todo` is the freshly spawned instance if one was already due, else `null` |
+| `{"op":"seriesList"}` | `{series:[…]}` |
+| `{"op":"seriesDelete","id":"…"}` | `{ok:true}` — deletes the series only, its last spawned item is untouched |
 
 Failures come back as `{"error":"…"}` with 400 (bad JSON), 401 (bad passphrase or
 token), 405 (wrong method) or 500. `remindAt` is any string `new Date()` parses and
@@ -409,6 +412,94 @@ rather than being silently swallowed.
 `Clear` under Completed and the `clearDone` op only touch items that are done and
 not cancelled, so nothing archived is ever destroyed by a bulk action. To purge
 one for real, `./infra/api.sh rm <prefix>` still works on cancelled items.
+
+### Recurring tasks
+
+A **series** is a background definition that periodically spawns an ordinary todo
+item — it is not itself a todo, and it never appears on the page. Two kinds:
+
+- **`cron`** — calendar-anchored: on a given day of the month, every N months, at
+  a given local time (`TIMEZONE`).
+- **`after`** — completion-anchored: N days after the series' own last instance
+  gets marked done (or cancelled), optionally at a fixed time of day rather
+  than whatever time completion happened to occur at.
+
+Managed from the shell only; the web UI shows nothing but a small 🔁 badge on any
+item that belongs to one:
+
+    ./infra/api.sh every "Change toothbrush" cron 5 2         # day 5, every 2 months, 09:00 default
+    ./infra/api.sh every "Change toothbrush" cron 5 2 14:30   # same, but 2:30 PM local
+    ./infra/api.sh every "Check battery" after 8              # 8 days after each completion
+    ./infra/api.sh series                                     # list series and what they last spawned
+    ./infra/api.sh stop 3a70                                  # delete a series — its last item is untouched
+
+A day-of-month past the end of a short month clamps to that month's last day
+(day 31 in February lands on the 28th, or the 29th in a leap year).
+
+`intervalMonths`/`afterDays` only govern the gap *after* the series is already
+running — they say nothing about when the very first occurrence should be, and
+the real world rarely lines up with "starting fresh right now." An optional
+trailing argument overrides just the first one:
+
+    ./infra/api.sh every "Change blades" cron 1 3 09:00 2   # every 3 months on the 1st,
+                                                             # but the next change is already due in 2
+    ./infra/api.sh every "Check battery" after 8 2          # re-checks every 8 days, but only
+                                                             # 2 days of charge are left right now
+
+Every occurrence after the first ignores the override and goes back to the
+plain `intervalMonths`/`afterDays` cadence — it's a one-time seed, not a
+change to the schedule itself, and it isn't kept once the first instance spawns.
+
+An `after` series can also fix the time of day every occurrence is due at,
+instead of the default of inheriting whatever time you happened to mark the
+previous one done:
+
+    ./infra/api.sh every "Charge battery" after 8 1 17:00   # first check tomorrow at 5 PM,
+                                                             # and every 8-day check after that
+                                                             # also lands at 5 PM, not whenever
+                                                             # you happened to finish charging
+
+Unlike the first-occurrence override, `HH:MM` here is not a one-time seed —
+it's stored on the series and applies to every future spawn. Omit it and an
+`after` series keeps its original behavior: each new instance is due exactly
+N days after the previous one's completion time, at that same time of day.
+
+The check rides the same sweep tick as reminder delivery (`SWEEP`), so a due
+series lags by up to that interval before spawning, same as reminder delivery
+itself. If several `cron` cycles were missed (the deploy was down for months),
+only one catch-up instance spawns — dated at the most recently missed
+occurrence, so it's eligible for that same tick's notification — and the
+schedule resumes from the next future date with no backlog.
+
+If the series' previous instance is still open when a new one spawns, it is
+silently cancelled — the same mechanism `cancel` uses, so it's archived and
+recoverable with `uncancel`, not destroyed, and with no toast in the browser
+since it's a background action, not something you did. This can only happen for
+`cron`: an `after` series only spawns once its previous instance has already
+resolved (done or cancelled), so there's never an open one left over to supersede.
+
+A stored series row looks like:
+
+    {
+      "id":   "series#7e2a1c40-...",
+      "kind": "cron",
+      "text": "Change toothbrush",
+      "dayOfMonth": 5, "intervalMonths": 2, "hour": 9, "minute": 0,
+      "nextDueAt":  "2026-11-05T17:00:00.000Z",
+      "lastTodoId": "3a704b50-f9ff-4217-911a-6f14ebf9f146",
+      "createdAt":  "2026-09-05T17:00:03.112Z"
+    }
+
+    {
+      "id":   "series#9b1d0e21-...",
+      "kind": "after",
+      "text": "Charge battery",
+      "afterDays": 8, "hour": 17, "minute": 0,        // hour/minute only if a fixed time was given
+      "lastTodoId": "cb2a5519-fac0-400f-a913-e7c4a14764a0",
+      "createdAt":  "2026-09-01T13:00:00.000Z"
+    }
+
+A todo spawned by a series carries `"seriesId": "series#..."` pointing back at it.
 
 ### Reminder semantics
 

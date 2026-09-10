@@ -114,7 +114,7 @@ say "Packaging"
   (cd lambda && npm install --omit=dev --no-audit --no-fund >/dev/null)
 }
 rm -rf build build.zip && mkdir -p build
-cp lambda/index.mjs lambda/page.html lambda/sw.js lambda/manifest.webmanifest \
+cp lambda/index.mjs lambda/seriesDate.mjs lambda/page.html lambda/sw.js lambda/manifest.webmanifest \
    lambda/icon.png lambda/package.json build/
 cp -r lambda/node_modules build/
 (cd build && zip -qr ../build.zip .)

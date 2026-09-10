@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NAME=work
-KNOWN=" url token list json raw add done rm cancel uncancel table sweep env logs state push testpush help -h --help "
+KNOWN=" url token list json raw add done rm cancel uncancel table sweep env logs state push testpush every series stop help -h --help "
 if [ $# -gt 0 ] && [ -n "$1" ] && [[ "$KNOWN" != *" $1 "* ]]; then
   NAME="$1"; shift
   [ -f "infra/config.$NAME.env" ] || {
@@ -87,6 +87,15 @@ resolve_id() {
     console.log(m[0].id)})'
 }
 
+# Series ids are "series#<uuid>"; match against the part after the prefix so
+# short hex prefixes work the same way todo ids do.
+resolve_series_id() {
+  call '{"op":"seriesList"}' | ID="$1" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const m=JSON.parse(s).series.filter(x=>x.id.replace(/^series#/,"").startsWith(process.env.ID));
+    if(m.length!==1){console.error(m.length?"ambiguous prefix":"no match");process.exit(1)}
+    console.log(m[0].id)})'
+}
+
 pretty() { node -e '
   let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
     let j; try{ j=JSON.parse(s) }catch{ console.log(s); return }
@@ -123,6 +132,25 @@ pretty() { node -e '
   });'
 }
 
+prettySeries() { node -e '
+  let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+    let j; try{ j=JSON.parse(s) }catch{ console.log(s); return }
+    const rows = Array.isArray(j.series) ? j.series : (j.series ? [j.series] : null);
+    if(!rows){ console.log(JSON.stringify(j,null,2)); return }
+    if(!rows.length){ console.log("(no series)"); return }
+    const fmt = iso => iso ? new Date(iso).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "-";
+    for(const s of rows){
+      const at = Number.isInteger(s.hour) ? ` @ ${String(s.hour).padStart(2,"0")}:${String(s.minute).padStart(2,"0")}` : "";
+      const sched = s.kind === "cron"
+        ? `day ${s.dayOfMonth} every ${s.intervalMonths}mo${at}  next ${fmt(s.nextDueAt)}`
+        : `${s.afterDays}d after done${at}`;
+      console.log([s.kind==="cron"?"[C]":"[A]", s.id.replace(/^series#/,"").slice(0,8),
+        sched, s.text + (s.lastTodoId ? "  (last: "+s.lastTodoId.slice(0,8)+")" : "")].join("  "));
+    }
+    if(j.todo) console.log(`\nspawned: ${j.todo.text}  due ${fmt(j.todo.remindAt)}`);
+  });'
+}
+
 case "$CMD" in
   url)    echo "$URL";;
   token)  token; echo;;
@@ -153,6 +181,38 @@ case "$CMD" in
             console.log("push:  " + (j.enabled ? "enabled" : "disabled (CHANNELS has no push, or no VAPID keys)"));
             if (j.enabled) console.log("devices subscribed: " + j.subs);})';;
   testpush) call '{"op":"testPush"}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(s))'; echo;;
+  every)  [ $# -ge 2 ] || { echo 'usage: every "text" cron <dayOfMonth> <intervalMonths> [HH:MM] [firstInMonths]' >&2
+                            echo '       every "text" after <days> [firstInDays] [HH:MM]' >&2; exit 1; }
+          TEXT="$1"; KIND="$2"; shift 2
+          case "$KIND" in
+            cron)
+              [ $# -ge 2 ] || { echo 'usage: every "text" cron <dayOfMonth> <intervalMonths> [HH:MM] [firstInMonths]' >&2; exit 1; }
+              DOM="$1"; MONTHS="$2"; HHMM="${3:-09:00}"; FIRST="${4:-}"
+              B=$(TEXT="$TEXT" DOM="$DOM" MONTHS="$MONTHS" HHMM="$HHMM" FIRST="$FIRST" node -e '
+                const [h,m] = process.env.HHMM.split(":").map(Number);
+                const body = {op:"seriesCreate", kind:"cron", text:process.env.TEXT,
+                  dayOfMonth:+process.env.DOM, intervalMonths:+process.env.MONTHS, hour:h, minute:m};
+                if (process.env.FIRST !== "") body.firstInMonths = +process.env.FIRST;
+                console.log(JSON.stringify(body));')
+              call "$B" | prettySeries;;
+            after)
+              [ $# -ge 1 ] || { echo 'usage: every "text" after <days> [firstInDays] [HH:MM]' >&2; exit 1; }
+              DAYS="$1"; FIRST="${2:-}"; HHMM="${3:-}"
+              B=$(TEXT="$TEXT" DAYS="$DAYS" FIRST="$FIRST" HHMM="$HHMM" node -e '
+                const body = {op:"seriesCreate", kind:"after", text:process.env.TEXT, afterDays:+process.env.DAYS};
+                if (process.env.FIRST !== "") body.firstInDays = +process.env.FIRST;
+                if (process.env.HHMM !== "") {
+                  const [h,m] = process.env.HHMM.split(":").map(Number);
+                  body.hour = h; body.minute = m;
+                }
+                console.log(JSON.stringify(body));')
+              call "$B" | prettySeries;;
+            *) echo "unknown kind '$KIND' (expected cron or after)" >&2; exit 1;;
+          esac;;
+  series) call '{"op":"seriesList"}' | prettySeries;;
+  stop)   [ $# -ge 1 ] || { echo "usage: stop <series-id-prefix>" >&2; exit 1; }
+          SID=$(resolve_series_id "$1") || exit 1
+          call "{\"op\":\"seriesDelete\",\"id\":\"$SID\"}"; echo;;
   table)  "${AWSR[@]}" dynamodb scan --table-name "$APP";;
   sweep)  OUT=$(mktemp)
           "${AWSR[@]}" lambda invoke --function-name "$APP" \
@@ -192,6 +252,7 @@ inspect
   state              one-page summary: endpoint, item count, SES, schedule, items
   list               todos as a table
   json               todos as raw JSON
+  series             recurring series as a table
   table              raw DynamoDB scan (bypasses the API entirely)
   push               whether web push is on, and how many devices subscribed
   env                the Lambda's environment variables
@@ -205,6 +266,17 @@ change
   cancel <id-prefix>               archive it: no reminders, hidden from the web UI
   uncancel <id-prefix>             bring it back
   rm <id-prefix>
+  every "text" cron <dayOfMonth> <intervalMonths> [HH:MM] [firstInMonths]
+                                    recurring series anchored to a calendar date (HH:MM local, default 09:00);
+                                    firstInMonths overrides how far out the very first one is, e.g. blades
+                                    due in 2 months even though the series repeats every 3
+  every "text" after <days> [firstInDays] [HH:MM]
+                                    recurring series anchored to completion of its own last instance;
+                                    firstInDays overrides only the very first gap, e.g. a battery with
+                                    2 days of charge left on a series that otherwise re-checks every 8;
+                                    HH:MM fixes every occurrence's time of day instead of inheriting
+                                    whatever time the item happened to get completed at
+  stop <series-id-prefix>          delete a series (leaves its last spawned item alone)
   raw '{"op":"clearDone"}'          any API call, verbatim
   sweep                            force the reminder run now
   testpush                         send a test notification to every device

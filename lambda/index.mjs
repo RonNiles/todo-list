@@ -6,6 +6,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
 import webpush from "web-push";
+import { decideCronTrigger, decideAfterTrigger, soonestCronOccurrence, nthMonthOccurrence } from "./seriesDate.mjs";
 
 const TABLE = process.env.TABLE;
 const PASSWORD_HASH = process.env.PASSWORD_HASH;
@@ -59,9 +60,11 @@ function verify(token) {
 
 /* ---------- data ---------- */
 
-// Push subscriptions live in the same table under a "sub#" id prefix, so every
-// read has to pick a side. The table is tiny; a scan is the right tool.
+// Push subscriptions and recurring-series definitions live in the same table under
+// "sub#"/"series#" id prefixes, so every read has to pick a side. The table is tiny;
+// a scan is the right tool.
 const SUB = "sub#";
+const SERIES = "series#";
 
 async function scanAll() {
   const items = [];
@@ -74,8 +77,19 @@ async function scanAll() {
   return items;
 }
 
-const allTodos = async () => (await scanAll()).filter((i) => !i.id.startsWith(SUB));
-const allSubs = async () => (await scanAll()).filter((i) => i.id.startsWith(SUB));
+function partition(items) {
+  const todos = [], subs = [], series = [];
+  for (const i of items) {
+    if (i.id.startsWith(SUB)) subs.push(i);
+    else if (i.id.startsWith(SERIES)) series.push(i);
+    else todos.push(i);
+  }
+  return { todos, subs, series };
+}
+
+const allTodos = async () => partition(await scanAll()).todos;
+const allSubs = async () => partition(await scanAll()).subs;
+const allSeries = async () => partition(await scanAll()).series;
 // Cancelled items stay in the table forever but are archived: no reminders, and
 // invisible to the web UI. Everything except the shell client reads this view.
 const activeTodos = async () => (await allTodos()).filter((t) => !t.cancelled);
@@ -113,6 +127,7 @@ async function api(op, body) {
         remindAt: normRemind(body.remindAt) || undefined,
         notified: false,
         createdAt: new Date().toISOString(),
+        seriesId: body.seriesId || undefined,
       };
       await ddb.send(new PutCommand({ TableName: TABLE, Item: item }));
       return { todo: item };
@@ -210,9 +225,122 @@ async function api(op, body) {
       return { removed: done.length };
     }
 
+    case "seriesCreate": {
+      const text = clean(body.text, 500);
+      if (!text) return { error: "empty" };
+      const notes = cleanNote(body.notes) || undefined;
+      if (body.kind !== "cron" && body.kind !== "after") return { error: "bad kind" };
+
+      const series = {
+        id: SERIES + crypto.randomUUID(),
+        kind: body.kind,
+        text,
+        notes,
+        createdAt: new Date().toISOString(),
+      };
+
+      // `firstInMonths`/`firstInDays` seed an explicit first occurrence for cases where
+      // the real world is already partway through a cycle (e.g. blades due in 2 months
+      // on a 3-month series, or a battery with only 2 days of charge left on an 8-day
+      // series) — every cycle after the first still uses the normal interval math.
+      let firstInDays;
+      if (body.kind === "cron") {
+        const dayOfMonth = Number(body.dayOfMonth);
+        const intervalMonths = Number(body.intervalMonths);
+        const hour = Number.isInteger(body.hour) ? body.hour : 9;
+        const minute = Number.isInteger(body.minute) ? body.minute : 0;
+        if (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) return { error: "bad dayOfMonth" };
+        if (!Number.isInteger(intervalMonths) || intervalMonths < 1) return { error: "bad intervalMonths" };
+        if (hour < 0 || hour > 23) return { error: "bad hour" };
+        if (minute < 0 || minute > 59) return { error: "bad minute" };
+        if ("firstInMonths" in body && !(Number.isInteger(body.firstInMonths) && body.firstInMonths >= 0)) {
+          return { error: "bad firstInMonths" };
+        }
+        series.dayOfMonth = dayOfMonth;
+        series.intervalMonths = intervalMonths;
+        series.hour = hour;
+        series.minute = minute;
+        series.nextDueAt = (Number.isInteger(body.firstInMonths)
+          ? nthMonthOccurrence(new Date(), body.firstInMonths, dayOfMonth, hour, minute, TIMEZONE)
+          : soonestCronOccurrence(dayOfMonth, hour, minute, TIMEZONE, new Date())).toISOString();
+      } else {
+        const afterDays = Number(body.afterDays);
+        if (!Number.isInteger(afterDays) || afterDays < 1) return { error: "bad afterDays" };
+        if ("firstInDays" in body && !(Number.isInteger(body.firstInDays) && body.firstInDays >= 0)) {
+          return { error: "bad firstInDays" };
+        }
+        series.afterDays = afterDays;
+        if (Number.isInteger(body.firstInDays)) firstInDays = body.firstInDays;
+
+        // Optional fixed time-of-day for every occurrence (first and subsequent alike) —
+        // without it, an instance fires at whatever time its anchor event happened to occur.
+        if ("hour" in body || "minute" in body) {
+          const hour = Number.isInteger(body.hour) ? body.hour : 9;
+          const minute = Number.isInteger(body.minute) ? body.minute : 0;
+          if (hour < 0 || hour > 23) return { error: "bad hour" };
+          if (minute < 0 || minute > 59) return { error: "bad minute" };
+          series.hour = hour;
+          series.minute = minute;
+        }
+      }
+
+      await ddb.send(new PutCommand({ TableName: TABLE, Item: series }));
+      const seed = firstInDays !== undefined ? { ...series, firstInDays } : series;
+      const r = await triggerSeriesIfDue(seed, Date.now(), null);
+      if (r.series) delete r.series.firstInDays; // never actually persisted — one-time seed only
+      return { series: r.series || series, todo: r.todo || null };
+    }
+
+    case "seriesList":
+      return { series: await allSeries() };
+
+    case "seriesDelete":
+      if (!body.id) return { error: "no id" };
+      await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { id: body.id } }));
+      return { ok: true };
+
     default:
       return { error: "unknown op" };
   }
+}
+
+/* ---------- recurring series ---------- */
+
+// Checks whether `series` should spawn its next instance right now. `trackedTodo` is the
+// full item currently pointed to by series.lastTodoId (or null if none/gone), so the pure
+// decideCronTrigger/decideAfterTrigger functions never need to touch the database.
+async function triggerSeriesIfDue(series, nowMs, trackedTodo) {
+  const withTz = { ...series, tz: TIMEZONE };
+  const decision = series.kind === "cron"
+    ? decideCronTrigger(withTz, nowMs, trackedTodo)
+    : decideAfterTrigger(withTz, nowMs, trackedTodo);
+  if (!decision) return { spawned: false, series };
+
+  if (decision.supersede) {
+    await api("update", { id: trackedTodo.id, cancelled: true });
+  }
+  const created = await api("create", {
+    text: series.text,
+    notes: series.notes,
+    remindAt: decision.spawnRemindAt.toISOString(),
+    seriesId: series.id,
+  });
+
+  const updated = { ...series, lastTodoId: created.todo.id };
+  const expr = series.kind === "cron" ? "SET lastTodoId = :t, nextDueAt = :n" : "SET lastTodoId = :t";
+  const values = series.kind === "cron"
+    ? { ":t": created.todo.id, ":n": decision.newNextDueAt.toISOString() }
+    : { ":t": created.todo.id };
+  if (series.kind === "cron") updated.nextDueAt = decision.newNextDueAt.toISOString();
+  await ddb.send(new UpdateCommand({
+    TableName: TABLE, Key: { id: series.id },
+    UpdateExpression: expr, ExpressionAttributeValues: values,
+  }));
+
+  return {
+    spawned: true, todo: created.todo, series: updated,
+    supersededId: decision.supersede ? trackedTodo.id : null,
+  };
 }
 
 /* ---------- reminder sweep ---------- */
@@ -279,14 +407,34 @@ async function sendPush(payload) {
 
 async function sweep() {
   const now = Date.now();
-  const due = (await allTodos()).filter(
+  const { todos, series } = partition(await scanAll());
+  const byId = new Map(todos.map((t) => [t.id, t]));
+
+  // Series bookkeeping runs unconditionally every tick, independent of whether the
+  // notification pass below manages to deliver anything.
+  const seriesOut = [];
+  const spawned = [];
+  for (const s of series) {
+    const tracked = s.lastTodoId ? byId.get(s.lastTodoId) || null : null;
+    const r = await triggerSeriesIfDue(s, now, tracked);
+    if (r.spawned) {
+      spawned.push(r.todo);
+      seriesOut.push({ seriesId: s.id, todoId: r.todo.id, supersededId: r.supersededId });
+    }
+  }
+  const withSeries = (o) => (seriesOut.length ? { ...o, series: seriesOut } : o);
+
+  // A catch-up instance for a missed cron cycle is dated in the past on purpose, so fold
+  // it into this same tick's notification pool instead of waiting another SWEEP interval.
+  const pool = todos.concat(spawned);
+  const due = pool.filter(
     (t) => !t.done && !t.cancelled && !t.notified &&
            t.remindAt && new Date(t.remindAt).getTime() <= now,
   );
-  if (!due.length) return { due: 0 };
+  if (!due.length) return withSeries({ due: 0 });
   due.sort((a, b) => a.remindAt.localeCompare(b.remindAt));
 
-  const out = { due: due.length };
+  const out = withSeries({ due: due.length });
   let delivered = false;
 
   if (EMAIL_ON) {
