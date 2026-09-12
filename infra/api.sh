@@ -289,7 +289,7 @@ change
                                     2 days of charge left on a series that otherwise re-checks every 8;
                                     HH:MM fixes every occurrence's time of day instead of inheriting
                                     whatever time the item happened to get completed at
-  stop <series-id-prefix>          delete a series (leaves its last spawned item alone)
+  stop <series-id-prefix>          delete a series (unlinks any items it spawned, otherwise untouched)
   recur <id-prefix> <afterDays> [HH:MM]
                                     turn an existing (usually already-done) item into an "after"
                                     series anchored on it — HH:MM optionally fixes the time of day

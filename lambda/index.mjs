@@ -237,7 +237,13 @@ async function api(op, body) {
         const g = await ddb.send(new GetCommand({ TableName: TABLE, Key: { id: body.fromTodoId } }));
         sourceTodo = g.Item || null;
         if (!sourceTodo) return { error: "no such item" };
-        if (sourceTodo.seriesId) return { error: "already part of a series" };
+        if (sourceTodo.seriesId) {
+          // A dangling seriesId (its series was deleted, or manually cleared) shouldn't
+          // block re-adopting the item — only an actually-still-existing series should.
+          const owner = await ddb.send(new GetCommand({ TableName: TABLE, Key: { id: sourceTodo.seriesId } }));
+          if (owner.Item) return { error: "already part of a series" };
+          delete sourceTodo.seriesId;
+        }
       }
 
       const text = sourceTodo ? sourceTodo.text : clean(body.text, 500);
@@ -320,10 +326,21 @@ async function api(op, body) {
     case "seriesList":
       return { series: await allSeries() };
 
-    case "seriesDelete":
+    case "seriesDelete": {
       if (!body.id) return { error: "no id" };
+      // Clear seriesId from every todo still pointing at this series (its tracked instance,
+      // and any earlier cycles superseded along the way) so nothing is left referencing a
+      // series that no longer exists — a dangling seriesId would otherwise keep the item
+      // stuck with a stale 🔁 badge and unable to be re-adopted via seriesCreate's fromTodoId.
+      const linked = (await allTodos()).filter((t) => t.seriesId === body.id);
+      for (const t of linked) {
+        await ddb.send(new UpdateCommand({
+          TableName: TABLE, Key: { id: t.id }, UpdateExpression: "REMOVE seriesId",
+        }));
+      }
       await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { id: body.id } }));
       return { ok: true };
+    }
 
     default:
       return { error: "unknown op" };

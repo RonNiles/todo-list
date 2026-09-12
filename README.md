@@ -246,7 +246,7 @@ field selects the operation. Every op except `login` needs a bearer token.
 | `{"op":"testPush"}` | `{sent:n, removed:n}` |
 | `{"op":"seriesCreate","kind":"cron"\|"after", …}` | `{series, todo}` — `todo` is the freshly spawned instance if one was already due, else `null` |
 | `{"op":"seriesList"}` | `{series:[…]}` |
-| `{"op":"seriesDelete","id":"…"}` | `{ok:true}` — deletes the series only, its last spawned item is untouched |
+| `{"op":"seriesDelete","id":"…"}` | `{ok:true}` — deletes the series; clears `seriesId` from any items it spawned, otherwise untouched |
 
 Failures come back as `{"error":"…"}` with 400 (bad JSON), 401 (bad passphrase or
 token), 405 (wrong method) or 500. `remindAt` is any string `new Date()` parses and
@@ -431,7 +431,7 @@ item that belongs to one:
     ./infra/api.sh every "Change toothbrush" cron 5 2 14:30   # same, but 2:30 PM local
     ./infra/api.sh every "Check battery" after 8              # 8 days after each completion
     ./infra/api.sh series                                     # list series and what they last spawned
-    ./infra/api.sh stop 3a70                                  # delete a series — its last item is untouched
+    ./infra/api.sh stop 3a70                                  # delete a series — unlinks (only) any items it spawned
 
 A day-of-month past the end of a short month clamps to that month's last day
 (day 31 in February lands on the 28th, or the 29th in a leap year).
@@ -526,8 +526,9 @@ being spawned: if it's already done, the series lands straight in the pending
 state (next due = its `doneAt` + `afterDays`, no new item created); if it's
 still open, the series just starts tracking it and waits for you to finish it
 as normal. Either way the item gets `seriesId` set (so it picks up the 🔁
-badge) and can't be adopted twice — converting one that's already part of a
-series is refused.
+badge) and can't be adopted into a second series while its current one still
+exists — `stop`ping that series clears the link, so the item is free to be
+adopted again afterward.
 
 ### Reminder semantics
 
