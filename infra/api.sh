@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NAME=work
-KNOWN=" url token list json raw add done rm cancel uncancel table sweep env logs state push testpush every series stop help -h --help "
+KNOWN=" url token list json raw add done rm cancel uncancel table sweep env logs state push testpush every series stop recur help -h --help "
 if [ $# -gt 0 ] && [ -n "$1" ] && [[ "$KNOWN" != *" $1 "* ]]; then
   NAME="$1"; shift
   [ -f "infra/config.$NAME.env" ] || {
@@ -215,6 +215,17 @@ case "$CMD" in
   stop)   [ $# -ge 1 ] || { echo "usage: stop <series-id-prefix>" >&2; exit 1; }
           SID=$(resolve_series_id "$1") || exit 1
           call "{\"op\":\"seriesDelete\",\"id\":\"$SID\"}"; echo;;
+  recur)  [ $# -ge 2 ] || { echo "usage: recur <id-prefix> <afterDays> [HH:MM]" >&2; exit 1; }
+          ID=$(resolve_id "$1") || exit 1
+          DAYS="$2"; HHMM="${3:-}"
+          B=$(ID="$ID" DAYS="$DAYS" HHMM="$HHMM" node -e '
+            const body = {op:"seriesCreate", kind:"after", fromTodoId:process.env.ID, afterDays:+process.env.DAYS};
+            if (process.env.HHMM !== "") {
+              const [h,m] = process.env.HHMM.split(":").map(Number);
+              body.hour = h; body.minute = m;
+            }
+            console.log(JSON.stringify(body));')
+          call "$B" | prettySeries;;
   table)  "${AWSR[@]}" dynamodb scan --table-name "$APP";;
   sweep)  OUT=$(mktemp)
           "${AWSR[@]}" lambda invoke --function-name "$APP" \
@@ -279,6 +290,9 @@ change
                                     HH:MM fixes every occurrence's time of day instead of inheriting
                                     whatever time the item happened to get completed at
   stop <series-id-prefix>          delete a series (leaves its last spawned item alone)
+  recur <id-prefix> <afterDays> [HH:MM]
+                                    turn an existing (usually already-done) item into an "after"
+                                    series anchored on it — HH:MM optionally fixes the time of day
   raw '{"op":"clearDone"}'          any API call, verbatim
   sweep                            force the reminder run now
   testpush                         send a test notification to every device

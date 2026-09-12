@@ -514,6 +514,21 @@ not due yet, waiting on the clock), never both.
 
 A todo spawned by a series carries `"seriesId": "series#..."` pointing back at it.
 
+Rather than starting a series fresh, you can turn an existing item — typically
+one you've already checked off — into the start of an `after` series:
+
+    ./infra/api.sh recur 1d52 42          # "Ebike chain lube", every 6 weeks from
+                                           # whenever it was last marked done
+    ./infra/api.sh recur 1d52 42 17:00    # same, but every future check lands at 5 PM
+
+The adopted item becomes the series' tracked instance instead of a fresh one
+being spawned: if it's already done, the series lands straight in the pending
+state (next due = its `doneAt` + `afterDays`, no new item created); if it's
+still open, the series just starts tracking it and waits for you to finish it
+as normal. Either way the item gets `seriesId` set (so it picks up the 🔁
+badge) and can't be adopted twice — converting one that's already part of a
+series is refused.
+
 ### Reminder semantics
 
 An item may carry one `remindAt`. Every sweep emails the items that are due, not

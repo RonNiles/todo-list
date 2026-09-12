@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { readFileSync } from "node:fs";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
-  DynamoDBDocumentClient, ScanCommand, PutCommand, UpdateCommand, DeleteCommand,
+  DynamoDBDocumentClient, ScanCommand, GetCommand, PutCommand, UpdateCommand, DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { SESv2Client, SendEmailCommand } from "@aws-sdk/client-sesv2";
 import webpush from "web-push";
@@ -226,9 +226,23 @@ async function api(op, body) {
     }
 
     case "seriesCreate": {
-      const text = clean(body.text, 500);
+      // fromTodoId turns an already-existing (usually already-completed) todo into the
+      // start of an "after" series, instead of spawning a brand-new instance — e.g. "make
+      // this thing I just did every 6 weeks from here on." The adopted todo becomes the
+      // series' tracked instance, so if it's already done, the series lands straight in the
+      // pending state (next due = its doneAt + afterDays) with no new item created.
+      let sourceTodo = null;
+      if (body.fromTodoId) {
+        if (body.kind !== "after") return { error: "fromTodoId only supported for kind:after" };
+        const g = await ddb.send(new GetCommand({ TableName: TABLE, Key: { id: body.fromTodoId } }));
+        sourceTodo = g.Item || null;
+        if (!sourceTodo) return { error: "no such item" };
+        if (sourceTodo.seriesId) return { error: "already part of a series" };
+      }
+
+      const text = sourceTodo ? sourceTodo.text : clean(body.text, 500);
       if (!text) return { error: "empty" };
-      const notes = cleanNote(body.notes) || undefined;
+      const notes = sourceTodo ? sourceTodo.notes : (cleanNote(body.notes) || undefined);
       if (body.kind !== "cron" && body.kind !== "after") return { error: "bad kind" };
 
       const series = {
@@ -242,7 +256,8 @@ async function api(op, body) {
       // `firstInMonths`/`firstInDays` seed an explicit first occurrence for cases where
       // the real world is already partway through a cycle (e.g. blades due in 2 months
       // on a 3-month series, or a battery with only 2 days of charge left on an 8-day
-      // series) — every cycle after the first still uses the normal interval math.
+      // series) — every cycle after the first still uses the normal interval math. Not
+      // applicable when adopting an existing todo — its own doneAt/cancelledAt is the anchor.
       let firstInDays;
       if (body.kind === "cron") {
         const dayOfMonth = Number(body.dayOfMonth);
@@ -266,11 +281,11 @@ async function api(op, body) {
       } else {
         const afterDays = Number(body.afterDays);
         if (!Number.isInteger(afterDays) || afterDays < 1) return { error: "bad afterDays" };
-        if ("firstInDays" in body && !(Number.isInteger(body.firstInDays) && body.firstInDays >= 0)) {
+        if (!sourceTodo && "firstInDays" in body && !(Number.isInteger(body.firstInDays) && body.firstInDays >= 0)) {
           return { error: "bad firstInDays" };
         }
         series.afterDays = afterDays;
-        if (Number.isInteger(body.firstInDays)) firstInDays = body.firstInDays;
+        if (!sourceTodo && Number.isInteger(body.firstInDays)) firstInDays = body.firstInDays;
 
         // Optional fixed time-of-day for every occurrence (first and subsequent alike) —
         // without it, an instance fires at whatever time its anchor event happened to occur.
@@ -284,9 +299,20 @@ async function api(op, body) {
         }
       }
 
+      if (sourceTodo) series.lastTodoId = sourceTodo.id;
       await ddb.send(new PutCommand({ TableName: TABLE, Item: series }));
+
+      if (sourceTodo) {
+        await ddb.send(new UpdateCommand({
+          TableName: TABLE, Key: { id: sourceTodo.id },
+          UpdateExpression: "SET seriesId = :s",
+          ExpressionAttributeValues: { ":s": series.id },
+        }));
+        sourceTodo.seriesId = series.id;
+      }
+
       const seed = firstInDays !== undefined ? { ...series, firstInDays } : series;
-      const r = await triggerSeriesIfDue(seed, Date.now(), null);
+      const r = await triggerSeriesIfDue(seed, Date.now(), sourceTodo);
       if (r.series) delete r.series.firstInDays; // never actually persisted — one-time seed only
       return { series: r.series || series, todo: r.todo || null };
     }
