@@ -184,6 +184,7 @@ Inspection:
     ./infra/api.sh logs 1h     tail CloudWatch logs
     ./infra/api.sh url         print the endpoint
     ./infra/api.sh token       print a bearer token
+    ./infra/api.sh token --expiry   when that cached token expires (45 days from login)
 
 Changes, for when the browser is not to hand:
 
@@ -385,6 +386,10 @@ find that without you doing anything.
 and returns an HMAC-signed 45-day token that the browser keeps in `localStorage`.
 Every other operation requires `Authorization: Bearer`. Wrong passwords cost a
 600 ms delay. The endpoint hostname is random and the page is `noindex`.
+
+The browser's token and `api.sh`'s cached one (`.token.<name>`) come from
+separate logins, so they expire independently — `./infra/api.sh token
+--expiry` only tells you about the CLI's own.
 
 That is deliberately thin: right for one person's todo list, not for shared or
 regulated data. There is no login rate limit beyond that delay; if you want one, add

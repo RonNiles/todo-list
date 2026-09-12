@@ -155,7 +155,14 @@ prettySeries() { node -e '
 
 case "$CMD" in
   url)    echo "$URL";;
-  token)  token; echo;;
+  token)  if [ "${1:-}" = "--expiry" ]; then
+            TOK=$(token) node -e '
+              const t = process.env.TOK;
+              const payload = JSON.parse(Buffer.from(t.split(".")[0], "base64url").toString());
+              console.log(new Date(payload.exp).toString());'
+          else
+            token; echo
+          fi;;
   list)   call '{"op":"list","includeCancelled":true}' | pretty;;
   json)   call '{"op":"list","includeCancelled":true}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.stringify(JSON.parse(s),null,2)))';;
   raw)    [ $# -ge 1 ] || { echo 'usage: raw '"'"'{"op":"list"}'"'"'' >&2; exit 1; }
@@ -271,7 +278,7 @@ inspect
   env                the Lambda's environment variables
   logs [since]       tail CloudWatch logs, e.g. logs 1h
   url                print the endpoint
-  token              print a bearer token (cached in $TOKFILE)
+  token [--expiry]   print a bearer token (cached in $TOKFILE), or when it expires
 
 change
   add "text" ["2026-09-01 17:00"]
