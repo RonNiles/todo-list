@@ -306,16 +306,10 @@ async function api(op, body) {
 
 /* ---------- recurring series ---------- */
 
-// Checks whether `series` should spawn its next instance right now. `trackedTodo` is the
-// full item currently pointed to by series.lastTodoId (or null if none/gone), so the pure
-// decideCronTrigger/decideAfterTrigger functions never need to touch the database.
-async function triggerSeriesIfDue(series, nowMs, trackedTodo) {
-  const withTz = { ...series, tz: TIMEZONE };
-  const decision = series.kind === "cron"
-    ? decideCronTrigger(withTz, nowMs, trackedTodo)
-    : decideAfterTrigger(withTz, nowMs, trackedTodo);
-  if (!decision) return { spawned: false, series };
-
+// Materializes a due occurrence: optionally supersedes the still-open previous instance,
+// creates the new todo, and updates the series' lastTodoId (plus nextDueAt for cron; cleared
+// for after, since its next gap isn't known until this new instance itself resolves).
+async function materializeSpawn(series, trackedTodo, decision) {
   if (decision.supersede) {
     await api("update", { id: trackedTodo.id, cancelled: true });
   }
@@ -327,11 +321,18 @@ async function triggerSeriesIfDue(series, nowMs, trackedTodo) {
   });
 
   const updated = { ...series, lastTodoId: created.todo.id };
-  const expr = series.kind === "cron" ? "SET lastTodoId = :t, nextDueAt = :n" : "SET lastTodoId = :t";
-  const values = series.kind === "cron"
-    ? { ":t": created.todo.id, ":n": decision.newNextDueAt.toISOString() }
-    : { ":t": created.todo.id };
-  if (series.kind === "cron") updated.nextDueAt = decision.newNextDueAt.toISOString();
+  delete updated.nextDueAt;
+  const setParts = ["lastTodoId = :t"];
+  const removeParts = [];
+  const values = { ":t": created.todo.id };
+  if (series.kind === "cron") {
+    setParts.push("nextDueAt = :n");
+    values[":n"] = decision.newNextDueAt.toISOString();
+    updated.nextDueAt = decision.newNextDueAt.toISOString();
+  } else {
+    removeParts.push("nextDueAt");
+  }
+  const expr = `SET ${setParts.join(", ")}` + (removeParts.length ? ` REMOVE ${removeParts.join(", ")}` : "");
   await ddb.send(new UpdateCommand({
     TableName: TABLE, Key: { id: series.id },
     UpdateExpression: expr, ExpressionAttributeValues: values,
@@ -341,6 +342,38 @@ async function triggerSeriesIfDue(series, nowMs, trackedTodo) {
     spawned: true, todo: created.todo, series: updated,
     supersededId: decision.supersede ? trackedTodo.id : null,
   };
+}
+
+// Checks whether `series` should spawn its next instance right now. `trackedTodo` is the
+// full item currently pointed to by series.lastTodoId (or null if none/gone), so the pure
+// decideCronTrigger/decideAfterTrigger functions never need to touch the database.
+//
+// `cron` is a plain due/not-due decision. `after` has a third, intermediate state: once its
+// tracked instance resolves, the next due date is computed and stashed on the series (without
+// creating a todo) so the open list doesn't fill up with items that aren't due for days or
+// weeks — the todo is only materialized once that stashed date actually arrives.
+async function triggerSeriesIfDue(series, nowMs, trackedTodo) {
+  const withTz = { ...series, tz: TIMEZONE };
+
+  if (series.kind === "cron") {
+    const decision = decideCronTrigger(withTz, nowMs, trackedTodo);
+    if (!decision) return { spawned: false, series };
+    return materializeSpawn(series, trackedTodo, decision);
+  }
+
+  const decision = decideAfterTrigger(withTz, nowMs, trackedTodo);
+  if (decision.status === "wait") return { spawned: false, series };
+  if (decision.status === "pending") {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE, Key: { id: series.id },
+      UpdateExpression: "SET nextDueAt = :n REMOVE lastTodoId",
+      ExpressionAttributeValues: { ":n": decision.nextDueAt.toISOString() },
+    }));
+    const updated = { ...series, nextDueAt: decision.nextDueAt.toISOString() };
+    delete updated.lastTodoId;
+    return { spawned: false, series: updated };
+  }
+  return materializeSpawn(series, trackedTodo, decision); // decision.status === "spawn"
 }
 
 /* ---------- reminder sweep ---------- */

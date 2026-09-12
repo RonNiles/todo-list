@@ -141,11 +141,13 @@ prettySeries() { node -e '
     const fmt = iso => iso ? new Date(iso).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}) : "-";
     for(const s of rows){
       const at = Number.isInteger(s.hour) ? ` @ ${String(s.hour).padStart(2,"0")}:${String(s.minute).padStart(2,"0")}` : "";
+      const next = s.nextDueAt ? `  next ${fmt(s.nextDueAt)}` : "";
       const sched = s.kind === "cron"
-        ? `day ${s.dayOfMonth} every ${s.intervalMonths}mo${at}  next ${fmt(s.nextDueAt)}`
-        : `${s.afterDays}d after done${at}`;
+        ? `day ${s.dayOfMonth} every ${s.intervalMonths}mo${at}${next}`
+        : `${s.afterDays}d after done${at}${next}`;
+      const tag = s.kind === "after" ? "open" : "last"; // after clears lastTodoId once resolved; cron never does
       console.log([s.kind==="cron"?"[C]":"[A]", s.id.replace(/^series#/,"").slice(0,8),
-        sched, s.text + (s.lastTodoId ? "  (last: "+s.lastTodoId.slice(0,8)+")" : "")].join("  "));
+        sched, s.text + (s.lastTodoId ? `  (${tag}: `+s.lastTodoId.slice(0,8)+")" : "")].join("  "));
     }
     if(j.todo) console.log(`\nspawned: ${j.todo.text}  due ${fmt(j.todo.remindAt)}`);
   });'

@@ -115,28 +115,42 @@ export function decideCronTrigger(series, nowMs, trackedTodo) {
   return { spawnRemindAt: last, newNextDueAt: next, supersede };
 }
 
-// series: {afterDays, tz, firstInDays?, hour?, minute?}
-// Returns null if the tracked instance is still open, else {spawnRemindAt: Date, supersede: false}.
+// series: {afterDays, tz, firstInDays?, hour?, minute?, nextDueAt?}
 //
-// `firstInDays`, when set, only ever applies to the very first instance (trackedTodo is
-// null) — it overrides the normal "afterDays from the anchor" gap for cases where the real
-// world is already partway through a cycle (e.g. a battery with only 2 days of charge left,
-// on a series that otherwise re-checks every 8 days after each completion).
+// Three-state result — { status: "wait" | "pending" | "spawn", ... }:
+//  - "wait": the tracked instance is still open, or a pending due date hasn't arrived yet.
+//  - "pending": the tracked instance just resolved and a next due date has been computed
+//    (nextDueAt), but it's still in the future — the caller should persist nextDueAt without
+//    creating a todo yet. Without this stage, the next instance would appear in the open list
+//    the moment the previous one is completed, even when it isn't due for days or weeks.
+//  - "spawn": nextDueAt (whether just computed or previously pending) has arrived — materialize
+//    the todo now, dated at spawnRemindAt.
+//
+// `firstInDays`, when set, only ever applies to the very first instance (trackedTodo is null
+// and no nextDueAt yet) — it overrides the normal "afterDays from the anchor" gap for cases
+// where the real world is already partway through a cycle (e.g. a battery with only 2 days of
+// charge left, on a series that otherwise re-checks every 8 days after each completion).
 //
 // `hour`/`minute`, when set, fix every occurrence's time-of-day (first and subsequent alike)
 // instead of the default of inheriting whatever time the anchoring event happened to occur at
 // — without this, a series completed once at 11pm keeps firing at 11pm forever.
 export function decideAfterTrigger(series, nowMs, trackedTodo) {
-  if (trackedTodo && !trackedTodo.done && !trackedTodo.cancelled) return null;
+  if (series.nextDueAt) {
+    if (new Date(series.nextDueAt).getTime() > nowMs) return { status: "wait" };
+    return { status: "spawn", spawnRemindAt: new Date(series.nextDueAt), supersede: false };
+  }
+
+  if (trackedTodo && !trackedTodo.done && !trackedTodo.cancelled) return { status: "wait" };
 
   const gap = (!trackedTodo && Number.isInteger(series.firstInDays)) ? series.firstInDays : series.afterDays;
   const anchor = !trackedTodo ? new Date(nowMs)
     : trackedTodo.done ? new Date(trackedTodo.doneAt)
     : new Date(trackedTodo.cancelledAt);
 
-  const spawnRemindAt = Number.isInteger(series.hour)
+  const dueAt = Number.isInteger(series.hour)
     ? addLocalDaysAt(anchor, gap, series.hour, Number.isInteger(series.minute) ? series.minute : 0, series.tz)
     : addLocalDays(anchor, gap, series.tz);
 
-  return { spawnRemindAt, supersede: false };
+  if (dueAt.getTime() <= nowMs) return { status: "spawn", spawnRemindAt: dueAt, supersede: false };
+  return { status: "pending", nextDueAt: dueAt };
 }

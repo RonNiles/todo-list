@@ -464,6 +464,15 @@ it's stored on the series and applies to every future spawn. Omit it and an
 `after` series keeps its original behavior: each new instance is due exactly
 N days after the previous one's completion time, at that same time of day.
 
+An `after` instance's todo isn't created the moment the previous one is
+completed — only once its due date actually arrives. In between, the series
+just remembers the computed date (`nextDueAt`, visible in `./infra/api.sh
+series`) with no open item cluttering the list; the todo materializes on the
+sweep tick where that date is finally reached, same as a `cron` occurrence
+always has. (`cron`'s own due date is likewise computed well ahead of time but
+never turns into a todo early, since it isn't reactive to anything — this just
+brings `after` in line with that.)
+
 The check rides the same sweep tick as reminder delivery (`SWEEP`), so a due
 series lags by up to that interval before spawning, same as reminder delivery
 itself. If several `cron` cycles were missed (the deploy was down for months),
@@ -495,9 +504,13 @@ A stored series row looks like:
       "kind": "after",
       "text": "Charge battery",
       "afterDays": 8, "hour": 17, "minute": 0,        // hour/minute only if a fixed time was given
-      "lastTodoId": "cb2a5519-fac0-400f-a913-e7c4a14764a0",
+      "nextDueAt":  "2026-09-17T00:00:00.000Z",       // pending: computed, not yet a todo
       "createdAt":  "2026-09-01T13:00:00.000Z"
     }
+
+An `after` series carries exactly one of `lastTodoId` (its currently open
+instance, waiting on you) or `nextDueAt` (its next occurrence is computed but
+not due yet, waiting on the clock), never both.
 
 A todo spawned by a series carries `"seriesId": "series#..."` pointing back at it.
 
